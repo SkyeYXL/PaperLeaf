@@ -1,0 +1,24 @@
+services:
+  paperleaf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paperleaf-v0-0-1
+    restart: unless-stopped
+    ports:
+      - "${PAPERLEAF_PORT:-3080}:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      PAPERLEAF_ADMIN_USER: ${PAPERLEAF_ADMIN_USER:-admin}
+      PAPERLEAF_ADMIN_PASSWORD: ${PAPERLEAF_ADMIN_PASSWORD:-admin123}
+      PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
+    volumes:
+      - ./data:/app/data
+      - ./library:/var/lib/paperleaf/library
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

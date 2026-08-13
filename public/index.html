@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>PaperLeaf · 纸笺</title>
+    <link rel="stylesheet" href="/tabler/tabler-icons.min.css">
+    <link rel="stylesheet" href="/app.css">
+    <link rel="stylesheet" href="/refinements.css?v=20260812-25">
+  </head>
+  <body data-view="list" data-auth-state="checking">
+    <main id="auth-loading" class="auth-loading" aria-live="polite" aria-label="正在确认登录状态">
+      <span class="auth-loading-mark" aria-hidden="true">纸</span>
+    </main>
+    <main id="login-screen" class="login-screen hidden">
+      <section class="login-paper" aria-labelledby="login-title">
+          <div class="brand large"><span>纸</span>PaperLeaf · 纸笺</div>
+        <p class="eyebrow">个人阅读档案</p>
+        <h1 id="login-title">把当下的链接，留给稍后的自己。</h1>
+        <p class="login-note">首次启动请使用管理员账户登录，并立即修改初始密码。</p>
+        <form id="login-form" class="form-stack">
+          <label>用户名<input name="username" autocomplete="username" value="admin" required></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+          <p class="form-message" id="login-message" role="alert"></p>
+          <button class="primary" type="submit"><i class="ti ti-login"></i>登录</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="application" class="hidden">
+      <header class="topbar">
+        <div class="brand"><span>纸</span>PaperLeaf · 纸笺</div>
+        <nav aria-label="阅读状态">
+          <button class="nav-link active" data-status="all">全部</button>
+          <button class="nav-link" data-status="unread">未读</button>
+          <button class="nav-link" data-status="archived">归档</button>
+          <button class="nav-link" data-status="favorite">收藏</button>
+        </nav>
+        <div class="top-actions">
+          <form class="quick-save" id="quick-save-form">
+            <i class="ti ti-link" aria-hidden="true"></i>
+            <input name="url" type="url" autocomplete="url" placeholder="粘贴网页链接" aria-label="网页链接" required>
+            <button class="add-button" type="submit"><i class="ti ti-download"></i>保存链接</button>
+          </form>
+          <button class="icon-button" id="settings-button" aria-label="设置" title="设置"><i class="ti ti-settings"></i></button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <section class="sidebar-search-section">
+            <label class="sidebar-search" id="article-search-wrap"><span class="sr-only">搜索文章标题</span><i class="ti ti-search" aria-hidden="true"></i><input id="article-search" type="search" placeholder="搜索文章标题"></label>
+          </section>
+          <section>
+            <div class="sidebar-section-title"><p class="side-label">收藏夹</p></div>
+            <div class="folder-list" id="folder-list"></div>
+            <button class="text-button" id="new-folder-button"><i class="ti ti-folder-plus"></i>新建收藏夹</button>
+          </section>
+          <section>
+            <p class="side-label">标签</p>
+            <div class="tag-list interactive" id="tag-list"></div>
+          </section>
+        </aside>
+
+        <section class="content">
+          <header class="content-heading">
+            <div><p class="eyebrow" id="heading-label">全部内容</p><h1 id="heading-title">先收下，留给稍后的自己。</h1></div>
+            <div class="heading-tools">
+              <div class="view-toggle" role="group" aria-label="视图切换">
+                <button type="button" class="vt-btn active" data-view="list" aria-pressed="true"><i class="ti ti-list"></i>列表</button>
+                <button type="button" class="vt-btn" data-view="cards" aria-pressed="false"><i class="ti ti-layout-cards"></i>卡片</button>
+              </div>
+              <span class="count" id="item-count">0 篇</span>
+            </div>
+          </header>
+          <div class="item-list" id="item-list"></div>
+          <div class="card-grid" id="card-grid"></div>
+          <section class="empty-state hidden" id="empty-state"><i class="ti ti-book-2"></i><h2>这里还没有文章</h2><p>保存一个公开网页，纸笺会留下安全的阅读快照和原文出处。</p><button class="primary" data-open-save><i class="ti ti-plus"></i>保存第一篇</button></section>
+        </section>
+
+        <aside class="rightbar">
+          <section><p class="side-label">今日回访</p><div class="daily-pick" id="daily-pick"></div></section>
+          <section><p class="side-label">最近笔记</p><div class="quiet-list" id="recent-highlights"></div></section>
+          <section class="api-card"><p class="wx-title"><span class="api-mark"><i class="ti ti-api"></i></span>API · Token</p><p>通过 Token 从 Hermes 保存和读取文章。</p><button class="text-button" data-open-settings><i class="ti ti-key"></i>管理 Token</button></section>
+          <section class="wx-card"><p class="wx-title"><span class="wx-dot"></span>微信公众号订阅</p><p>仅接入官方接口或已授权来源。v0.0.1 可登记来源与授权记录，不保存个人微信凭据。</p><button class="text-button" id="wx-button"><i class="ti ti-shield-check"></i>查看合规说明</button></section>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="save-dialog"><form id="save-form" class="form-stack"><header><div><p class="eyebrow">保存网页</p><h2>放进稍后阅读</h2></div><button type="button" class="icon-button" data-close="save-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><label>原文链接<input name="url" type="url" placeholder="https://example.com/article" required></label><label>标签，用逗号分隔<input name="tags" placeholder="产品, 技术"></label><label>收藏夹<div class="select-control" id="save-folder-control"><input type="hidden" name="folderId" id="save-folder-select" value=""><button class="select-trigger" type="button" aria-expanded="false" aria-haspopup="listbox"><span>不归入收藏夹</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="select-menu" role="listbox" aria-label="收藏夹"></div></div></label><p class="form-message" id="save-message" role="alert"></p><footer><button class="secondary" type="button" data-close="save-dialog">取消</button><button class="primary" type="submit"><i class="ti ti-download"></i>保存并抓取</button></footer></form></dialog>
+
+    <section id="reader-page" class="reader-page hidden" aria-label="文章详情">
+      <header class="reader-bar">
+        <button class="text-button reader-back" id="reader-back"><i class="ti ti-arrow-left"></i>收件箱</button>
+        <span class="reader-bar-title" id="reader-bar-title"></span>
+        <span class="reader-percent" id="reader-percent">0%</span>
+        <div class="reader-actions">
+          <button class="icon-button" id="reader-read" aria-label="切换已读" title="切换已读"><i class="ti ti-check"></i></button>
+          <button class="icon-button" id="reader-favorite" aria-label="切换收藏" title="切换收藏"><i class="ti ti-star"></i></button>
+          <button class="icon-button" id="reader-archive" aria-label="切换归档" title="切换归档"><i class="ti ti-archive"></i></button>
+          <button class="icon-button" id="reader-refetch" aria-label="重新抓取正文" title="重新抓取正文"><i class="ti ti-refresh"></i></button>
+          <button class="icon-button" id="reader-print" aria-label="导出 PDF" title="导出 PDF"><i class="ti ti-file-type-pdf"></i></button>
+          <button class="icon-button" id="reader-appearance-button" aria-label="字体和页面显示" title="字体和页面显示" aria-expanded="false"><i class="ti ti-typography"></i></button>
+          <button class="icon-button" id="reader-mode-button" aria-label="切换极简模式" title="切换极简模式" aria-pressed="false"><i class="ti ti-layout-sidebar-right-collapse"></i></button>
+        </div>
+        <div class="reader-progress" id="reader-progress" aria-hidden="true"></div>
+      </header>
+      <section class="reader-appearance hidden" id="reader-appearance" aria-label="字体和页面显示">
+        <header><strong>字体和页面显示</strong><button class="icon-button" type="button" id="reader-appearance-close" aria-label="关闭"><i class="ti ti-x"></i></button></header>
+        <div class="reader-setting-row reader-font-family-row"><span>字体</span><div class="select-control reader-font-control" id="reader-font-family-control"><select id="reader-font-family" class="select-native-value" aria-label="阅读字体"><option value="songti">宋体</option><option value="lora">Lora</option><option value="public-sans">Public Sans</option><option value="merriweather">Merriweather</option><option value="inter">Inter</option><option value="plex-serif">Plex Serif</option><option value="literata">Literata</option><option value="luciole">Luciole</option><option value="atkinson">Atkinson Hyperlegible</option><option value="jetbrains-mono">JetBrains Mono</option></select><button class="select-trigger" type="button" aria-expanded="false" aria-haspopup="listbox"><span>宋体</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="select-menu" role="listbox" aria-label="阅读字体"></div></div></div>
+        <div class="reader-setting-row"><span>文字大小</span><div class="reader-size-options" role="group" aria-label="文字大小"><button type="button" data-reader-font="15">15</button><button type="button" data-reader-font="16">16</button><button type="button" data-reader-font="17">17</button><button type="button" data-reader-font="18">18</button><button type="button" data-reader-font="19">19</button></div></div>
+        <div class="reader-setting-row"><span>阅读宽度</span><div class="reader-segment"><button type="button" data-reader-width="narrow">窄</button><button type="button" data-reader-width="standard">标准</button><button type="button" data-reader-width="wide">宽</button></div></div>
+        <div class="reader-setting-row"><span>行高</span><div class="reader-segment"><button type="button" data-reader-line="compact">紧凑</button><button type="button" data-reader-line="normal">标准</button><button type="button" data-reader-line="spacious">舒展</button></div></div>
+      </section>
+      <div class="reader-shell">
+        <aside class="reader-toc"><p class="side-label">目录</p><nav id="reader-toc-list" aria-label="文章目录"></nav></aside>
+        <main class="reader-main">
+          <header class="reader-heading"><p class="eyebrow" id="reader-meta"></p><h1 id="reader-title"></h1></header>
+          <div class="fetch-notice hidden" id="fetch-notice"><span id="fetch-notice-text"></span></div>
+          <article class="reader-article" id="reader-content"></article>
+        </main>
+        <aside class="reader-notes">
+          <section class="reader-properties"><header><p class="side-label">文章属性</p><button class="reader-property-edit-toggle" type="button" id="reader-property-edit-toggle" aria-label="编辑文章属性" title="编辑文章属性"><i class="ti ti-pencil"></i></button></header><dl><div><dt>标题</dt><dd><span id="reader-prop-title"></span></dd></div><div><dt>描述</dt><dd><span id="reader-prop-summary"></span></dd></div><div><dt>来源</dt><dd><a id="reader-prop-source" target="_blank" rel="noopener noreferrer"></a></dd></div><div><dt>保存时间</dt><dd id="reader-prop-saved"></dd></div><div><dt>字数</dt><dd id="reader-prop-words"></dd></div><div><dt>时长</dt><dd id="reader-prop-duration"></dd></div><div><dt>收藏夹</dt><dd><span id="reader-prop-folders"></span></dd></div><div><dt>标签</dt><dd><span id="reader-prop-tags"></span></dd></div></dl></section>
+          <section class="highlights"><h2>高亮与笔记</h2><div id="highlight-list"></div><button class="text-button reader-new-highlight" type="button" id="new-highlight-button"><i class="ti ti-highlight"></i>选择正文添加笔记</button></section>
+        </aside>
+      </div>
+    </section>
+
+    <form class="highlight-popover hidden" id="highlight-popover" aria-label="添加高亮笔记">
+      <div class="highlight-popover-head"><span>高亮</span><span class="highlight-yellow-swatch" aria-label="黄色高亮"></span></div>
+      <label>笔记<textarea name="note" maxlength="600" placeholder="记录你的想法"></textarea></label>
+      <div class="highlight-popover-actions"><button class="secondary" type="button" id="highlight-cancel">取消</button><button class="primary" type="submit"><i class="ti ti-device-floppy"></i>保存</button></div>
+    </form>
+
+    <dialog class="highlight-detail-dialog" id="highlight-detail-dialog"><article><header><div><p class="eyebrow">高亮笔记</p><h2>笔记详情</h2></div><button class="icon-button" type="button" data-close="highlight-detail-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><section><h3>笔记</h3><p id="highlight-detail-note"></p><h3>高亮文字</h3><blockquote id="highlight-detail-text"></blockquote></section></article></dialog>
+    <dialog class="reader-confirm-dialog" id="highlight-delete-dialog"><article><header><div><p class="eyebrow">删除笔记</p><h2>确认删除这条笔记？</h2></div><button class="icon-button" type="button" data-close="highlight-delete-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><p>删除后，高亮和笔记内容将无法恢复。</p><footer><button class="secondary" type="button" data-close="highlight-delete-dialog">取消</button><button class="primary danger-primary" type="button" id="highlight-delete-confirm"><i class="ti ti-trash"></i>删除</button></footer></article></dialog>
+    <dialog class="reader-property-dialog" id="reader-property-dialog"><form class="form-stack" id="reader-property-form"><header><div><p class="eyebrow">文章属性</p><h2>修改文章属性</h2></div><button class="icon-button" type="button" data-close="reader-property-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><label>标题<input name="title" maxlength="300" required></label><label>描述<textarea name="summary" maxlength="2000" rows="5"></textarea></label><fieldset class="property-folder-field"><legend>收藏夹</legend><div class="select-control reader-folder-control" id="reader-edit-folders"><select id="reader-edit-folder-value" class="select-native-value" aria-label="收藏夹"></select><button class="select-trigger" type="button" aria-expanded="false" aria-haspopup="listbox"><span>不归入收藏夹</span><i class="ti ti-chevron-down" aria-hidden="true"></i></button><div class="select-menu" role="listbox" aria-label="收藏夹"></div></div><div class="new-folder-inline"><input id="reader-new-folder" maxlength="60" placeholder="新建收藏夹名称"><button class="secondary" id="reader-new-folder-button" type="button"><i class="ti ti-folder-plus"></i>新建</button></div></fieldset><label>标签<div class="tag-editor" id="reader-tag-editor"><div class="tag-editor-chips" id="reader-tag-chips"></div><input id="reader-tag-input" type="text" autocomplete="off" placeholder="#steam 后按回车生成标签"></div><span class="field-hint">只接受 #标签名；输入后按回车生成标签。</span></label><p class="form-message" id="reader-property-message" role="alert"></p><footer><button class="secondary" type="button" data-close="reader-property-dialog">取消</button><button class="primary" type="submit"><i class="ti ti-device-floppy"></i>保存</button></footer></form></dialog>
+    <dialog class="image-preview-dialog" id="image-preview-dialog"><article><header><div><p class="eyebrow">正文图片</p><h2>图片预览</h2></div><button class="icon-button" type="button" data-close="image-preview-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><img id="image-preview" alt=""></article></dialog>
+    <dialog class="home-delete-dialog reader-confirm-dialog" id="home-delete-dialog"><article><header><div><p class="eyebrow">删除文章</p><h2>确认删除这篇文章？</h2></div><button class="icon-button" type="button" data-close="home-delete-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><p id="home-delete-copy">删除后，文章快照、图片、高亮与笔记将无法恢复。</p><footer><button class="secondary" type="button" data-close="home-delete-dialog">取消</button><button class="primary danger-primary" type="button" id="home-delete-confirm"><i class="ti ti-trash"></i>删除</button></footer></article></dialog>
+    <dialog class="reader-confirm-dialog" id="token-revoke-dialog"><article><header><div><p class="eyebrow">撤销 Token</p><h2>确认撤销这个 Token？</h2></div><button class="icon-button" type="button" data-close="token-revoke-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><p>撤销后，该 Token 将立即失效且无法恢复。</p><footer><button class="secondary" type="button" data-close="token-revoke-dialog">取消</button><button class="primary danger-primary" type="button" id="token-revoke-confirm"><i class="ti ti-trash"></i>撤销</button></footer></article></dialog>
+
+    <section id="settings-page" class="settings-page hidden" aria-label="设置">
+      <header class="settings-bar"><button class="text-button settings-back" id="settings-back"><i class="ti ti-arrow-left"></i>收件箱</button><div><p class="eyebrow">账户与自动化</p><h1>设置</h1></div></header>
+      <div class="settings-shell">
+        <aside class="settings-nav" aria-label="设置导航">
+          <p class="side-label">设置</p>
+          <button class="active" type="button" data-settings-section="settings-account"><i class="ti ti-user-circle"></i>账户安全</button>
+          <button type="button" data-settings-section="settings-token"><i class="ti ti-key"></i>API Token</button>
+          <button id="admin-nav" type="button" data-settings-section="admin-section"><i class="ti ti-users"></i>用户管理</button>
+          <button type="button" data-settings-section="settings-data"><i class="ti ti-database"></i>数据管理</button>
+          <button type="button" data-settings-section="settings-extension"><i class="ti ti-browser"></i>Edge 扩展</button>
+        </aside>
+        <main class="settings-main">
+          <section class="settings-panel" id="settings-account"><header><p class="eyebrow">账户</p><h2>账户安全</h2><p class="account-line" id="account-line"></p></header><form id="password-form" class="form-stack"><label>当前密码<input name="currentPassword" type="password" required></label><label>新密码<input name="newPassword" type="password" minlength="12" required></label><button class="secondary" type="submit"><i class="ti ti-lock"></i>更新密码</button></form><p class="form-message" id="password-message"></p></section>
+          <section class="settings-panel" id="settings-token"><header><p class="eyebrow">接口访问</p><h2>API Token</h2><p class="setting-copy">创建后仅展示一次完整 Token。Edge 扩展和 Hermes 使用 <code>Authorization: Bearer &lt;token&gt;</code>。</p></header><form id="token-form" class="inline-form"><input name="name" placeholder="例如：Edge 插件" required><button class="secondary" type="submit"><i class="ti ti-key"></i>创建</button></form><div id="new-token" class="token-value hidden"></div><div class="quiet-list" id="token-list"></div></section>
+          <section class="settings-panel hidden" id="admin-section"><header><p class="eyebrow">管理员</p><h2>用户管理</h2></header><form id="user-form" class="form-stack"><label>用户名<input name="username" pattern="[a-zA-Z0-9_-]{3,40}" required></label><label>初始密码<input name="password" type="password" minlength="12" required></label><label>角色<select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label><button class="secondary" type="submit"><i class="ti ti-user-plus"></i>新增用户</button></form><div class="quiet-list user-list" id="user-list"></div></section>
+          <section class="settings-panel" id="settings-data"><header><p class="eyebrow">资料库</p><h2>数据管理</h2><p class="setting-copy">批量保存链接，或将当前阅读库导出为可迁移的文件。</p></header><div class="settings-data-actions"><button class="secondary" type="button" id="settings-import-button"><i class="ti ti-file-import"></i>批量导入</button><button class="secondary" type="button" id="settings-export-json-button"><i class="ti ti-file-export"></i>导出 JSON</button><button class="secondary" type="button" id="settings-export-csv-button"><i class="ti ti-file-spreadsheet"></i>导出 CSV</button></div></section>
+          <section class="settings-panel" id="settings-extension"><header><p class="eyebrow">浏览器</p><h2>Edge 扩展</h2></header><p class="setting-copy">在 Edge 打开 <code>edge://extensions</code>，启用“开发人员模式”，选择“加载解压缩的扩展”，再选中本项目的 <code>extension</code> 文件夹。</p></section>
+        </main>
+      </div>
+    </section>
+
+    <dialog id="import-dialog"><form id="import-form" class="form-stack"><header><div><p class="eyebrow">批量导入</p><h2>逐条保存链接</h2></div><button type="button" class="icon-button" data-close="import-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><label>每行一个 URL，单次最多 50 条<textarea name="urls" placeholder="https://example.com/article-1&#10;https://example.com/article-2" required></textarea></label><label>统一添加的标签（可选）<input name="tags" placeholder="待整理, 周末读"></label><p class="form-message" id="import-message"></p><footer><button type="button" class="secondary" data-close="import-dialog">取消</button><button class="primary" type="submit"><i class="ti ti-file-import"></i>开始导入</button></footer></form></dialog>
+
+    <dialog id="folder-dialog"><form id="folder-form" class="form-stack"><header><div><p class="eyebrow">收藏夹</p><h2>新建收藏夹</h2></div><button type="button" class="icon-button" data-close="folder-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><label>名称<input name="name" maxlength="60" required></label><p class="form-message" id="folder-message"></p><footer><button type="button" class="secondary" data-close="folder-dialog">取消</button><button class="primary" type="submit"><i class="ti ti-folder-plus"></i>创建</button></footer></form></dialog>
+
+    <dialog id="wx-dialog"><article><header><div><p class="eyebrow">公众号来源</p><h2>合规订阅边界</h2></div><button type="button" class="icon-button" data-close="wx-dialog" aria-label="关闭"><i class="ti ti-x"></i></button></header><div class="prose"><p>本版本不模拟个人微信客户端，不保存密码、Cookie、扫码登录凭据或会话，也不绕过验证码、访问控制与平台风控。</p><p>后续仅会接入微信公众号平台官方接口、合法内容分发渠道，或已获得权利人书面授权的数据源。无法确认授权的来源不会启用自动同步。</p></div></article></dialog>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js?v=20260812-22"></script>
+  </body>
+</html>
