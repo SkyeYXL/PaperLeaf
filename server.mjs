@@ -326,12 +326,17 @@ function migrateArchivePaths() {
     if (item.archive_folder !== folder) db.prepare('UPDATE items SET archive_folder=? WHERE id=?').run(folder, item.id);
   }
 }
-async function createMissingArchivePdfs() {
+async function createMissingArchivePdfs({ force = false } = {}) {
   const rows = db.prepare("SELECT * FROM items WHERE fetch_status='ready' AND trim(html_snapshot)<>'' ORDER BY created_at,id").all();
   for (const item of rows) {
     const archive = archiveInfo(item);
-    if (!existsSync(join(archive.directory, archive.documentFile)) || existsSync(join(archive.directory, archive.pdfFile))) continue;
-    try { await createArchivePdf(archive.directory, archive, item.html_snapshot, { title: item.title, url: item.url }); }
+    const documentPath = join(archive.directory, archive.documentFile);
+    const pdfPath = join(archive.directory, archive.pdfFile);
+    if (!existsSync(documentPath) || (!force && existsSync(pdfPath))) continue;
+    // The archived document rewrites downloaded images to local files.  The database snapshot
+    // deliberately keeps its original URLs, so using it here can create a PDF without images.
+    const localSnapshot = readFileSync(documentPath, 'utf8');
+    try { await createArchivePdf(archive.directory, archive, localSnapshot, { title: item.title, url: item.url }); }
     catch (error) { console.warn(`PDF archive skipped for ${item.id}: ${error.message}`); }
   }
 }
@@ -365,14 +370,27 @@ async function createArchivePdf(staging, archive, snapshot, metadata = {}) {
   const executable = pdfBrowserExecutable();
   if (!executable) throw new Error('未找到可用的 Chromium 浏览器，无法生成 PDF。');
   const pdfFile = join(staging, archive.pdfFile);
-  const browser = await pdfChromium().launch({ headless: true, executablePath: executable, args: ['--no-sandbox', '--disable-gpu'] });
+  const pdfSourceFile = join(staging, '.paperleaf-pdf-source.html');
+  // PDF input uses a file: base URL so archived image assets can be embedded without relying on the original site.
+  const browser = await pdfChromium().launch({ headless: true, executablePath: executable, args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files'] });
   try {
     const page = await browser.newPage();
-    await page.setContent(pdfDocument(snapshot, metadata, staging), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // Navigating to a local file (instead of injecting into about:blank) gives its sibling archive assets
+    // a file origin that Chromium is allowed to read during PDF rendering.
+    writeFileSync(pdfSourceFile, pdfDocument(snapshot, metadata, staging), 'utf8');
+    await page.goto(pathToFileURL(pdfSourceFile).href, { waitUntil: 'load', timeout: 30_000 });
+    const imageState = await page.evaluate(async () => {
+      const images = Array.from(document.images).filter((image) => image.getAttribute('src'));
+      await Promise.all(images.map((image) => image.decode?.().catch(() => undefined)));
+      return images.map((image) => ({ src: image.currentSrc || image.src, complete: image.complete, width: image.naturalWidth }));
+    });
+    const missingImages = imageState.filter((image) => !image.complete || image.width === 0);
+    if (missingImages.length) throw new Error(`${missingImages.length} 张文章图片未能载入，已取消生成不完整 PDF。`);
     await page.pdf({ path: pdfFile, format: 'A4', printBackground: true, margin: { top: '18mm', right: '16mm', bottom: '18mm', left: '16mm' } });
     if (!existsSync(pdfFile) || readFileSync(pdfFile).subarray(0, 4).toString() !== '%PDF') throw new Error('浏览器未生成有效 PDF 文件。');
   } finally {
     await browser.close();
+    try { if (existsSync(pdfSourceFile)) unlinkSync(pdfSourceFile); } catch { /* A later rebuild can safely replace this ephemeral source. */ }
   }
 }
 async function archiveSnapshot(userId, itemId, snapshot, archive = null, metadata = null) {
@@ -808,7 +826,7 @@ function serveStatic(req, res, url) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  migrate(); await seed(); migrateArchivePaths(); await createMissingArchivePdfs();
+  migrate(); await seed(); migrateArchivePaths(); await createMissingArchivePdfs({ force: process.env.PAPERLEAF_REBUILD_PDFS === '1' });
   createServer(async (req, res) => { try { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (url.pathname.startsWith('/api/')) await api(req, res, url); else serveStatic(req, res, url); } catch (error) { console.error(error); fail(res, 500, 'INTERNAL_ERROR', '请求未完成，请稍后重试。'); } }).listen(port, host, () => console.log(`PaperLeaf listening on http://${host}:${port}`));
 }
 
