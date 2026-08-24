@@ -1,24 +1,24 @@
-# PaperLeaf v0.0.1 Docker 发布范围
+# PaperLeaf v0.0.2 GitHub Docker 发布内容
 
-本仓库是 PaperLeaf（纸笺）v0.0.1 的 Docker 发布版本，仅包含运行服务所需的源代码、容器配置、开源图标许可说明和获作者授权发布的界面截图。
+v0.0.2 完成后，在版本目录下新建独立的 Docker 发布目录作为 GitHub 仓库根目录。该目录只复制容器运行所需文件，不将本地开发目录直接初始化为 Git 仓库。
 
-## 仓库包含
+## 发布目录包含
 
-- `server.mjs` 与 `public/`：服务端和 Web 前端
-- `Dockerfile`、`docker-compose.yml`、`.env.example`：容器部署配置
-- `assets/screenshots/homepage-list.png`：获作者授权发布的首页截图
-- `README.md`：部署、备份和 API 使用说明
+- `server.mjs`、`public/`、`package.json`（Docker 镜像安装运行依赖所必需）
+- `docker/Dockerfile`、`docker/docker-compose.yml`、`docker/.env.example`
+- `README.md`、`.gitignore`、`docker/Dockerfile.dockerignore`
+- 经确认可公开或私有发布的截图及第三方许可文件
 
-## 部署后创建但不提交
+## 明确排除
 
-- `data/`：SQLite 数据库、会话、Token、用户偏好和文章元数据
-- `library/`：每篇文章的 HTML 快照、下载图片和后续 PDF 文件
-- `.env`：部署者自己的端口和初始管理员密码
+- `data/`、`library/`、`.env` 和任何 SQLite WAL/SHM 文件
+- `tests/`、`extension/`、`scripts/` 及本地 npm 开发依赖
+- 根目录 `docs/`、`backup/`、`dependencies/`、`sample/`、`skill/`
+- 未经单独确认的截图、账号、Token、Cookie、文章快照或其他个人资料
 
-## 明确不包含
+## 发布前核验
 
-- 本地开发依赖、npm 脚本、测试、浏览器扩展和维护脚本
-- 本地开发文档、备份、未获授权发布的历史截图及任何其他个人资料
-- 已抓取文章、数据库、Token、Cookie、账号或密码
-
-提交前执行 `git status --ignored`，确认只有本说明列出的发布文件进入版本控制。
+1. 检查发布目录的 `git ls-files`，确认仅有上述白名单文件。
+2. 检查文本中不含真实账号、邮箱、Token、密码或个人路径。
+3. 使用独立的 `.gitignore` 排除 `data/`、`Library/`、`docker/.env` 与数据库日志。
+4. 在 Docker 构建、健康检查与 README 部署步骤验证通过后，再创建私有 GitHub 仓库并推送对应版本标签。

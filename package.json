@@ -1,0 +1,24 @@
+{
+  "name": "paperleaf-v0.0.2",
+  "description": "PaperLeaf (纸笺) v0.0.2 web reading archive.",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "check": "node --check server.mjs && node ../tests/v0.0.2/snapshot-cleanup.mjs",
+    "test:api": "node ../tests/v0.0.2/api-smoke.mjs",
+    "test:browser": "node ../tests/v0.0.2/browser-smoke.mjs",
+    "test:tags": "node ../tests/v0.0.2/tag-management-smoke.mjs",
+    "test:home-preferences": "node ../tests/v0.0.2/home-preferences-smoke.mjs",
+    "test:api-tokens": "node ../tests/v0.0.2/api-token-settings-smoke.mjs",
+    "test:reader-timeline": "node ../tests/v0.0.2/reader-timeline-detail-smoke.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.55.0"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

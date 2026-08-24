@@ -1,0 +1,44 @@
+services:
+  # Compose 内部服务标识。
+  paperleaf:
+    build:
+      # v0.0.2 源码目录作为镜像构建上下文。
+      context: ..
+      # Dockerfile 相对于构建上下文的位置。
+      dockerfile: docker/Dockerfile
+    # 容器命名规则：PaperLeaf_v<版本号>。
+    container_name: PaperLeaf_v0.0.2
+    # Docker 或宿主机重启后自动恢复；手动停止时保持停止。
+    restart: unless-stopped
+    ports:
+      # 宿主机端口可通过 docker/.env 中的 PAPERLEAF_PORT 修改；容器应用端口固定为 3080。
+      - "${PAPERLEAF_PORT:-3080}:3080"
+    environment:
+      # 容器内监听地址，需保留为 0.0.0.0 以接收 Docker 转发流量。
+      HOST: 0.0.0.0
+      # 容器内应用端口；应与 ports 右侧保持一致。
+      PORT: 3080
+      # SQLite、用户设置和 Token 加密密钥的容器内目录；由下方 data 挂载持久化。
+      PAPERLEAF_DATA_DIR: /app/data
+      # 首次初始化管理员用户名；默认 admin，可在 docker/.env 修改。
+      PAPERLEAF_ADMIN_USER: ${PAPERLEAF_ADMIN_USER:-admin}
+      # 首次初始化管理员密码；默认 admin123，可在 docker/.env 修改。
+      PAPERLEAF_ADMIN_PASSWORD: ${PAPERLEAF_ADMIN_PASSWORD:-admin123}
+      # 文章 HTML、PDF 与本地图片的容器内目录；由下方 Library 挂载持久化。
+      PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
+    volumes:
+      # 宿主机 data：数据库和应用配置，对应 PAPERLEAF_DATA_DIR。
+      - ../../data:/app/data
+      # 宿主机 Library：文章 HTML、PDF 和图片，对应 PAPERLEAF_ARCHIVE_DIR。
+      - ../../Library:/var/lib/paperleaf/library
+    healthcheck:
+      # 请求健康接口，HTTP 成功则本次检查通过。
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      # 每 30 秒检查一次。
+      interval: 30s
+      # 单次检查最多等待 5 秒。
+      timeout: 5s
+      # 启动后 10 秒内不计入失败次数。
+      start_period: 10s
+      # 连续失败 3 次后标记为 unhealthy。
+      retries: 3

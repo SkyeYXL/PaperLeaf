@@ -1,11 +1,8 @@
-# Runtime data and credentials must never be committed.
-data/
-library/
-.env
-
-# Local tooling and generated files.
-node_modules/
-npm-debug.log*
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.env
+../backup/
+../library/
+../docs/
+../dependencies/
