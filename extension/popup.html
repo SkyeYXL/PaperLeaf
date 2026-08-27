@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>保存到 PaperLeaf</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header class="app-header">
+        <span class="brand-mark" aria-hidden="true">纸</span>
+        <div><strong>PaperLeaf · 纸笺</strong><small id="header-copy">保存当前网页</small></div>
+      </header>
+
+      <section id="capture-view">
+        <div class="mode-switch" role="tablist" aria-label="保存方式">
+          <button class="mode-button active" type="button" role="tab" aria-selected="true" data-mode="link">保存链接</button>
+          <button class="mode-button" type="button" role="tab" aria-selected="false" data-mode="selection">保存选中文字</button>
+        </div>
+        <label>网页标题<input id="title" maxlength="300" autocomplete="off" placeholder="当前网页标题"></label>
+        <label>网页链接<input id="url" type="url" readonly></label>
+        <label id="selection-field" class="hidden">已选文字<textarea id="selection" readonly rows="4" placeholder="请先在网页中选中需要保存的文字，再打开小程序。"></textarea></label>
+        <label>标签<div class="tag-editor-wrap"><div class="tag-editor" id="tag-editor"><div id="tag-chips" class="tag-chips"></div><input id="tag-input" autocomplete="off" aria-autocomplete="list" aria-controls="tag-suggestions" placeholder="#标签名后按回车生成标签"></div><div id="tag-suggestions" class="tag-suggestions hidden" role="listbox" aria-label="标签补全建议"></div></div></label>
+        <span class="field-hint">可直接选择已有标签，或输入 #标签名后按回车创建。</span>
+        <section class="tag-picker" aria-labelledby="existing-tags-title">
+          <div><strong id="existing-tags-title">已有标签</strong><span id="tag-status">配置完成后自动加载</span></div>
+          <div id="tag-options" class="tag-options"></div>
+        </section>
+        <button id="save" type="button">保存链接</button>
+      </section>
+
+      <section id="settings-view" class="hidden" aria-labelledby="settings-title">
+        <div class="settings-heading"><button id="close-settings" class="back-button" type="button">← 返回</button><h1 id="settings-title">设置</h1></div>
+        <p class="setting-copy">服务器地址和 API Token 仅保存在当前浏览器的扩展本地存储中。</p>
+        <label>服务器地址<input id="server" type="url" inputmode="url" autocomplete="url" placeholder="http://127.0.0.1:3080"></label>
+        <label>API Token<div class="token-input"><input id="token" type="password" autocomplete="off" placeholder="pl_..."><button id="toggle-token" type="button" aria-label="查看 API Token" title="查看 API Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></div></label>
+        <div class="settings-actions"><button id="test-connection" class="quiet-button" type="button">测试连通性</button><button id="save-settings" type="button">保存配置</button></div>
+      </section>
+
+      <section id="result-view" class="hidden" aria-labelledby="result-title">
+        <p class="result-eyebrow">保存完成</p>
+        <h1 id="result-title">网页已存入 PaperLeaf</h1>
+        <dl class="saved-page-info">
+          <div><dt>网页标题</dt><dd id="saved-title">—</dd></div>
+          <div><dt>网页链接</dt><dd id="saved-url">—</dd></div>
+          <div><dt>标签</dt><dd id="saved-tags">未添加标签</dd></div>
+          <div><dt>保存进度</dt><dd id="saved-progress">已写入文章 HTML 档案</dd></div>
+        </dl>
+        <div id="saved-progress-track" class="saved-progress-track" role="progressbar" aria-label="保存进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="saved-progress-bar"></span></div>
+        <div class="saved-actions" aria-label="文章操作">
+          <button id="saved-read" class="quiet-button" type="button">标记为已读</button>
+          <button id="saved-favorite" class="quiet-button" type="button">收藏</button>
+          <button id="saved-archive" class="quiet-button" type="button">归档</button>
+        </div>
+        <button id="save-another" class="back-button result-back" type="button">← 继续保存网页</button>
+      </section>
+
+      <p id="message" role="alert" aria-live="polite"></p>
+      <div id="connection-bar" class="connection-bar">
+        <p id="web-app-entry" class="web-app-entry"><span id="web-app-user">当前用户</span> 已连接至 <a id="open-web-app" href="http://127.0.0.1:3080/" target="_blank" rel="noopener noreferrer"><span id="web-app-server">127.0.0.1:3080</span></a></p>
+        <button id="open-settings" class="footer-settings" type="button" aria-label="设置" title="设置">设置</button>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

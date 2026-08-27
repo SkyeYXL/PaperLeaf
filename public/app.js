@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+const docsSettingsTarget = new URLSearchParams(window.location.search).get('settings');
 const state = { user: null, status: 'all', tag: '', folderId: '', search: '', items: [], dashboard: null, reader: null, workspace: 'articles', homeView: 'list', notes: [], noteTotal: 0, selectedNoteId: '', noteArticleQuery: '', noteField: 'note', noteArticleStatus: 'all', notesScroll: 0, noteEditing: false, noteArticleSuggestions: [], manageMode: 'folders', manageRows: [], manageTags: [], manageSelectedId: '', manageDetail: null, manageQuery: '', manageDialog: null, manageDialogType: 'folders', timelineItems: [], timelinePage: 1, timelineTotal: 0, timelineHasMore: false, timelineStats: { events: 0, articles: 0, notes: 0, archivedArticles: 0 }, timelineType: 'all', timelineArticleStatus: 'all', timelineView: 'cards' };
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const readerDate = (value) => { const date = new Date(value); const pad = (number) => String(number).padStart(2, '0'); return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`; };
@@ -152,10 +153,6 @@ function openNotesWorkspace({ restore = false } = {}) {
   setSelectOptions($('#notes-note-field-control'), $('#notes-note-field'), [{ value: 'note', label: '笔记内容' }, { value: 'highlight', label: '高亮片段' }]);
   loadNotes({ restore });
 }
-function closeNotesWorkspace() {
-  state.workspace = 'articles'; state.noteEditing = false; $('#notes-page').classList.add('hidden'); $('.layout').classList.remove('hidden'); $('#application').classList.remove('notes-active');
-  $$('.nav-link').forEach((button) => button.classList.toggle('active', button.dataset.status === state.status));
-}
 function renderNotes() {
   const notes = state.notes; const list = $('#notes-list'); const empty = $('#notes-empty'); const selected = notes.find((note) => note.id === state.selectedNoteId) || notes[0] || null;
   if (selected && selected.id !== state.selectedNoteId) state.selectedNoteId = selected.id;
@@ -209,6 +206,32 @@ async function loadContent() {
   const params = new URLSearchParams(); if (state.status !== 'all') params.set('status', state.status); if (state.tag) params.set('tag', state.tag); if (state.folderId) params.set('folderId', state.folderId); if (state.search) params.set('q', state.search);
   try { const [items, dashboard] = await Promise.all([request(`/api/items?${params}`), request('/api/dashboard')]); state.items = items.items; state.dashboard = dashboard; renderDashboard(); renderItems(); updateHeading(); } catch (error) { toast(error.message); }
 }
+async function copyReaderCode(value) {
+  if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(value); return; }
+  const textarea = document.createElement('textarea');
+  textarea.value = value; textarea.setAttribute('readonly', ''); textarea.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+  document.body.append(textarea); textarea.select();
+  const copied = document.execCommand('copy'); textarea.remove();
+  if (!copied) throw new Error('复制失败');
+}
+function addReaderCodeCopyButtons(content) {
+  content.querySelectorAll('pre').forEach((pre) => {
+    const code = pre.querySelector('code'); const value = (code || pre).textContent || '';
+    if (!value.trim()) return;
+    const wrapper = document.createElement('div'); wrapper.className = 'reader-code-block';
+    pre.replaceWith(wrapper); wrapper.append(pre);
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'reader-code-copy'; button.setAttribute('aria-label', '复制代码'); button.title = '复制代码';
+    button.innerHTML = '<i class="ti ti-copy"></i><span>复制</span>';
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { await copyReaderCode(value); button.innerHTML = '<i class="ti ti-check"></i><span>已复制</span>'; }
+      catch { button.innerHTML = '<i class="ti ti-x"></i><span>复制失败</span>'; }
+      window.setTimeout(() => { button.innerHTML = '<i class="ti ti-copy"></i><span>复制</span>'; button.disabled = false; }, 1600);
+    });
+    wrapper.append(button);
+  });
+}
 function renderReaderContent(snapshot, error) {
   const content = $('#reader-content'); const template = document.createElement('template');
   template.innerHTML = snapshot || `<p>${escapeHtml(error || '此网页未能生成阅读快照。')}</p>`;
@@ -221,11 +244,12 @@ function renderReaderContent(snapshot, error) {
     if (element.matches('a')) { element.target = '_blank'; element.rel = 'noopener noreferrer'; }
   });
   content.replaceChildren(template.content);
+  addReaderCodeCopyButtons(content);
   content.querySelectorAll('img').forEach((image) => { const openImage = () => openImagePreview(image.currentSrc || image.src, image.alt || '正文图片'); image.addEventListener('click', openImage); image.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openImage(); } }); });
   applyArticleHighlights();
   const headings = [...content.querySelectorAll('h2,h3')]; const toc = $('#reader-toc-list');
   headings.forEach((heading, index) => { heading.id ||= `reader-section-${index + 1}`; });
-  toc.innerHTML = headings.length ? headings.map((heading) => `<button type="button" class="${heading.tagName === 'H3' ? 'sub' : ''}" data-reader-section="${heading.id}">${escapeHtml(heading.textContent.trim() || '未命名段落')}</button>`).join('') : '<span class="reader-toc-empty">正文没有可用目录</span>';
+  toc.innerHTML = headings.length ? headings.map((heading) => { const label = heading.textContent.trim() || '未命名段落'; return `<button type="button" class="${heading.tagName === 'H3' ? 'sub' : ''}" data-reader-section="${heading.id}" title="${escapeHtml(label)}">${escapeHtml(label)}</button>`; }).join('') : '<span class="reader-toc-empty">正文没有可用目录</span>';
   $$('[data-reader-section]').forEach((button) => button.addEventListener('click', () => document.getElementById(button.dataset.readerSection)?.scrollIntoView({ behavior: 'smooth', block: 'start' })));
 }
 async function savePreferences(changes) {
@@ -271,7 +295,7 @@ async function openReaderPropertyEditor() {
 function syncReaderState(item) {
   const readButton = $('#reader-read'); readButton.classList.toggle('active', item.is_read); readButton.setAttribute('aria-label', item.is_read ? '标记为未读' : '标记为已读'); readButton.setAttribute('title', item.is_read ? '标记为未读' : '标记为已读'); readButton.innerHTML = '<i class="ti ti-check"></i>';
   $('#reader-favorite').classList.toggle('active', item.is_favorite); $('#reader-archive').classList.toggle('active', item.is_archived);
-  const pdfButton = $('#reader-pdf'); const hasPdf = Boolean(item.pdf_path); pdfButton.disabled = !hasPdf; pdfButton.setAttribute('aria-label', hasPdf ? '查看 PDF' : 'PDF 尚未生成'); pdfButton.setAttribute('title', hasPdf ? '查看 PDF' : 'PDF 尚未生成');
+  const pdfButton = $('#reader-pdf'); const hasArchive = Boolean(item.archive_path); pdfButton.disabled = !hasArchive; pdfButton.setAttribute('aria-label', hasArchive ? '生成并查看 PDF' : 'HTML 档案尚未生成'); pdfButton.setAttribute('title', hasArchive ? '生成并查看 PDF' : 'HTML 档案尚未生成');
 }
 function propertyPills(entries, emptyLabel, prefix = '') { return entries.length ? entries.map((entry) => `<span>${prefix}${escapeHtml(entry.name)}</span>`).join('') : `<em>${emptyLabel}</em>`; }
 function renderReaderProperties(item) {
@@ -347,15 +371,6 @@ function articleTextNodes() {
   const walker = document.createTreeWalker($('#reader-content'), NodeFilter.SHOW_TEXT, { acceptNode: (node) => node.nodeValue.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
   const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode); return nodes;
 }
-function pointAtArticleOffset(offset) {
-  let passed = 0;
-  for (const node of articleTextNodes()) {
-    const next = passed + node.nodeValue.length;
-    if (offset <= next) return { node, offset: Math.max(0, offset - passed) };
-    passed = next;
-  }
-  return null;
-}
 function highlightSelectionOffsets(range) {
   const root = $('#reader-content');
   const before = document.createRange(); before.selectNodeContents(root); before.setEnd(range.startContainer, range.startOffset);
@@ -388,9 +403,12 @@ function openHighlightPopover(range) {
   const text = range.toString().replace(/\s+/g, ' ').trim();
   if (!text || text.length > 4000 || !$('#reader-content').contains(range.commonAncestorContainer)) return;
   if ($$('#reader-content .reader-highlight').some((mark) => range.intersectsNode(mark))) return toast('这段文字已经有笔记了。');
-  const offsets = highlightSelectionOffsets(range); const rect = range.getBoundingClientRect(); const popover = $('#highlight-popover');
+  const offsets = highlightSelectionOffsets(range); const rect = range.getBoundingClientRect(); const popover = $('#highlight-popover'); const edge = 14; const gap = 12;
   pendingHighlightSelection = { text, ...offsets }; popover.classList.remove('hidden');
-  const width = Math.min(390, window.innerWidth - 28); popover.style.width = `${width}px`; popover.style.left = `${Math.min(Math.max(14, rect.left), window.innerWidth - width - 14)}px`; popover.style.top = `${Math.min(window.innerHeight - 236, Math.max(14, rect.bottom + 12))}px`;
+  const width = Math.min(390, window.innerWidth - edge * 2); popover.style.width = `${width}px`; popover.style.left = `${Math.min(Math.max(edge, rect.left), window.innerWidth - width - edge)}px`; popover.style.maxHeight = `${Math.max(160, window.innerHeight - edge * 2)}px`;
+  const height = popover.getBoundingClientRect().height; const below = window.innerHeight - rect.bottom - gap; const above = rect.top - gap;
+  if (below >= height || below >= above) popover.style.top = `${Math.max(edge, Math.min(rect.bottom + gap, window.innerHeight - Math.min(height, window.innerHeight - edge * 2) - edge))}px`;
+  else popover.style.top = `${Math.max(edge, rect.top - gap - height)}px`;
 }
 function jumpToHighlight(highlightId) {
   const target = $(`.reader-highlight[data-highlight-id="${highlightId}"]`);
@@ -415,29 +433,52 @@ async function updateItem(changes, refresh = true) {
 }
 async function loadTokens() { const tokens = await request('/api/tokens'); $('#token-list').innerHTML = tokens.length ? tokens.map((token) => `<div class="token-record"><div class="token-record-main"><strong>${escapeHtml(token.name)}</strong><code class="token-plaintext">${escapeHtml(token.token)}</code><span>${token.scopes.join(', ')} · 创建于 ${shortDate(token.created_at)}${token.last_used_at ? ` · 最近使用 ${shortDate(token.last_used_at)}` : ''}</span></div><button class="secondary" type="button" data-revoke-token="${token.id}">撤销</button></div>`).join('') : '<div class="token-empty"><span>还没有 Token</span></div>';
   $$('[data-revoke-token]').forEach((button) => button.addEventListener('click', () => { pendingTokenRevoke = button.dataset.revokeToken; dialog('token-revoke-dialog'); })); }
-async function loadUsers() { if (state.user.role !== 'admin') return; const users = await request('/api/users'); $('#user-list').innerHTML = users.map((user) => `<div><strong>${escapeHtml(user.username)}${user.disabled ? '（已禁用）' : ''}</strong><span>${user.role === 'admin' ? '管理员' : '普通用户'} · ${shortDate(user.created_at)}</span>${user.id === state.user.id ? '' : `<button data-toggle-user="${user.id}" data-disabled="${user.disabled}">${user.disabled ? '启用' : '禁用'}</button>`}</div>`).join(''); $$('[data-toggle-user]').forEach((button) => button.addEventListener('click', async () => { const disabled = button.dataset.disabled !== 'true'; try { await request(`/api/users/${button.dataset.toggleUser}`, { method: 'PATCH', body: JSON.stringify({ disabled }) }); toast(disabled ? '用户已禁用。' : '用户已启用。'); loadUsers(); } catch (error) { toast(error.message); } })); }
+async function loadUsers() { if (state.user.role !== 'admin') return; const users = await request('/api/users'); $('#user-list').innerHTML = users.map((user) => `<div class="user-record"><div class="user-record-main"><strong>${escapeHtml(user.username)}</strong><span>${user.role === 'admin' ? '管理员' : '普通用户'} · ${shortDate(user.created_at)}</span></div>${user.id === state.user.id ? '<span class="user-record-spacer" aria-hidden="true"></span>' : `<button class="secondary" type="button" data-delete-user="${user.id}">删除</button>`}</div>`).join(''); $$('[data-delete-user]').forEach((button) => button.addEventListener('click', async () => { button.disabled = true; try { await request(`/api/users/${button.dataset.deleteUser}`, { method: 'DELETE' }); toast('用户及其全部数据已删除。'); await loadUsers(); } catch (error) { toast(error.message); button.disabled = false; } })); }
 function setSettingsPage(sectionId) { $$('[data-settings-section]').forEach((button) => { const active = button.dataset.settingsSection === sectionId; button.classList.toggle('active', active); button.setAttribute('aria-current', active ? 'page' : 'false'); }); $$('.settings-panel').forEach((panel) => panel.classList.toggle('hidden', panel.id !== sectionId)); }
-function closeSettingsPage() { $('#settings-page').classList.add('hidden'); $('#application').classList.remove('settings-active'); window.scrollTo({ top: 0, behavior: 'instant' }); }
-async function openSettings() {
-  $('#account-line').textContent = `${state.user.username} · ${state.user.role === 'admin' ? '管理员' : '普通用户'}`;
-  const isAdmin = state.user.role === 'admin'; $('#admin-nav').classList.toggle('hidden', !isAdmin); $('#new-token').classList.add('hidden');
-  await loadTokens(); await loadUsers(); setSettingsPage('settings-account'); $('#settings-page').classList.remove('hidden'); $('#application').classList.add('settings-active'); window.scrollTo({ top: 0, behavior: 'instant' });
+async function refreshWorkspaceAfterSettings() {
+  // Refresh the homepage data on every return; restore the active workspace as well so data changed in another tab or via the extension is immediately visible.
+  const refreshes = [loadContent()];
+  if (state.workspace === 'notes') refreshes.push(loadNotes({ restore: true }));
+  if (state.workspace === 'manage') refreshes.push(loadManage());
+  if (state.workspace === 'timeline') { state.timelinePage = 1; refreshes.push(loadTimeline()); }
+  await Promise.all(refreshes);
 }
-function downloadExport(format = 'json') { window.location.assign(`/api/export?format=${encodeURIComponent(format)}`); }
+async function closeSettingsPage({ refresh = true } = {}) { $('#settings-page').classList.add('hidden'); $('#application').classList.remove('settings-active'); window.scrollTo({ top: 0, behavior: 'instant' }); if (refresh) await refreshWorkspaceAfterSettings(); }
+async function openSettings(sectionId = 'settings-account') {
+  $('#account-line').textContent = `${state.user.username} · ${state.user.role === 'admin' ? '管理员' : '普通用户'}`;
+  const isAdmin = state.user.role === 'admin'; $('#admin-nav').classList.toggle('hidden', !isAdmin); $$('[data-admin-only]').forEach((element) => element.classList.toggle('hidden', !isAdmin)); $('#data-non-admin-copy').classList.toggle('hidden', isAdmin); $('#new-token').classList.add('hidden');
+  await loadTokens(); await loadUsers(); setSettingsPage(sectionId); $('#settings-page').classList.remove('hidden'); $('#application').classList.add('settings-active'); window.scrollTo({ top: 0, behavior: 'instant' });
+}
+function downloadExport() { window.location.assign('/api/export'); }
 async function initialize() {
   document.body.dataset.authState = 'checking';
   try { state.user = await request('/api/auth/me'); const preferences = await request('/api/preferences'); readerDisplay = { ...readerDisplayDefaults, ...(preferences.readerDisplay || {}) }; setHomeView(preferences.homepageView || savedHomeView()); applyReaderDisplay(); $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden'); const routeParams = new URLSearchParams(window.location.search); const routeStatus = routeParams.get('status'); state.status = articleStatuses.has(routeStatus) ? routeStatus : 'all'; if (window.location.hash === '#notes') { state.noteArticleQuery = routeParams.get('articleQ') || ''; state.noteQuery = routeParams.get('noteQ') || ''; state.noteField = routeParams.get('noteField') === 'highlight' ? 'highlight' : 'note'; state.noteArticleStatus = routeParams.get('noteArticleStatus') || 'all'; state.selectedNoteId = routeParams.get('note') || ''; openNotesWorkspace({ restore: true }); } else { $$('.nav-link').forEach((button) => button.classList.toggle('active', button.dataset.status === state.status)); await loadContent(); } const readerId = readerIdFromLocation(); if (readerId) await openItem(readerId, { updateRoute: false, restoreProgress: true }); document.body.dataset.authState = 'authenticated'; } catch { $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); document.body.dataset.authState = 'unauthenticated'; }
 }
 
+if (docsSettingsTarget === 'token') {
+  const openTokenSettingsFromDocs = () => {
+    if (state.user) return openSettings('settings-token');
+    if (document.body.dataset.authState === 'checking') window.setTimeout(openTokenSettingsFromDocs, 50);
+  };
+  window.setTimeout(openTokenSettingsFromDocs, 0);
+}
+
+function passwordVisibilityIcon(visible) { return visible ? '<i class="ti ti-eye-off" aria-hidden="true"></i>' : '<i class="ti ti-eye" aria-hidden="true"></i>'; }
+function addPasswordVisibilityControl(input) { const wrapper = document.createElement('span'); wrapper.className = 'password-input'; input.before(wrapper); wrapper.append(input); const button = document.createElement('button'); button.type = 'button'; button.className = 'password-visibility-toggle'; button.setAttribute('aria-label', '查看密码'); button.setAttribute('title', '查看密码'); button.innerHTML = passwordVisibilityIcon(false); button.addEventListener('click', () => { const visible = input.type === 'text'; input.type = visible ? 'password' : 'text'; button.setAttribute('aria-label', visible ? '查看密码' : '隐藏密码'); button.setAttribute('title', visible ? '查看密码' : '隐藏密码'); button.innerHTML = passwordVisibilityIcon(!visible); }); wrapper.append(button); }
+$$('input[type="password"]').forEach(addPasswordVisibilityControl);
+$$('form').forEach((form) => { form.noValidate = true; });
+setSelectOptions($('#user-role-control'), $('#user-role-value'), [{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]);
 $('#login-form').addEventListener('submit', async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { state.user = await request('/api/auth/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(form)) }); $('#login-message').textContent = ''; await initialize(); } catch (error) { $('#login-message').textContent = error.message; } });
-async function saveUrl(url, { tags = [], folderId = '' } = {}) { const result = await request('/api/items', { method: 'POST', body: JSON.stringify({ url, tags, folderId }) }); toast(result.duplicate ? '该链接已存在，已打开现有条目。' : result.item.fetch_status === 'failed' ? '链接已保存，但抓取失败，可从原文打开。' : '已保存并生成阅读快照。'); await loadContent(); await openItem(result.item.id); return result; }
+async function saveUrl(url, { tags = [], folderId = '' } = {}) { const result = await request('/api/items', { method: 'POST', body: JSON.stringify({ url, tags, folderId }) }); toast(result.item.fetch_status === 'failed' ? '链接已保存，但抓取失败，可从原文打开。' : '已保存并生成阅读快照。'); await loadContent(); await openItem(result.item.id); return result; }
 $$('[data-open-save]').forEach((button) => button.addEventListener('click', () => dialog('save-dialog')));
 $('#quick-save-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; const submit = formElement.querySelector('[type="submit"]'); const url = new FormData(formElement).get('url'); submit.disabled = true; try { await saveUrl(url); formElement.reset(); } catch (error) { toast(error.message); } finally { submit.disabled = false; } });
 $('#save-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const submit = formElement.querySelector('[type="submit"]'); submit.disabled = true; $('#save-message').textContent = '正在抓取网页并生成安全快照…'; try { await saveUrl(form.get('url'), { tags: String(form.get('tags')).split(/[，,]/).map((tag) => tag.trim()).filter(Boolean), folderId: form.get('folderId') }); closeDialog('save-dialog'); formElement.reset(); } catch (error) { $('#save-message').textContent = error.message; } finally { submit.disabled = false; } });
-$('#import-form').addEventListener('submit', async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const urls = String(form.get('urls')).split(/\r?\n/).map((url) => url.trim()).filter(Boolean); $('#import-message').textContent = `正在处理 ${urls.length} 条链接…`; try { const result = await request('/api/import', { method: 'POST', body: JSON.stringify({ urls, tags: String(form.get('tags')).split(/[，,]/).map((tag) => tag.trim()).filter(Boolean) }) }); $('#import-message').textContent = `已完成：${result.successful}/${result.total} 条。`; toast(`批量导入完成：${result.successful}/${result.total} 条成功。`); await loadContent(); } catch (error) { $('#import-message').textContent = error.message; } });
-$('#settings-import-button').addEventListener('click', () => dialog('import-dialog')); $('#settings-export-json-button').addEventListener('click', () => downloadExport('json')); $('#settings-export-csv-button').addEventListener('click', () => downloadExport('csv')); $('#new-folder-button').addEventListener('click', () => dialog('folder-dialog')); $('#notes-new-folder').addEventListener('click', () => dialog('folder-dialog')); $('#folder-form').elements.name.maxLength = 9; $('#reader-new-folder').maxLength = 9; $('#folder-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; try { await request('/api/folders', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(formElement))) }); closeDialog('folder-dialog'); formElement.reset(); toast('收藏夹已创建。'); await loadContent(); } catch (error) { $('#folder-message').textContent = error.message; } });
-$('#settings-button').addEventListener('click', openSettings); $$('[data-open-settings]').forEach((button) => button.addEventListener('click', openSettings)); $('#wx-button').addEventListener('click', () => dialog('wx-dialog'));
-$('#settings-back').addEventListener('click', closeSettingsPage);
+$('#service-import-file-button').addEventListener('click', () => $('#service-import-file').click());
+$('#service-import-file').addEventListener('change', (event) => { const file = event.currentTarget.files?.[0]; $('#service-import-file-name').textContent = file ? `${file.name}（${Math.ceil(file.size / 1024)} KB）` : '尚未选择文件'; $('#data-transfer-message').textContent = ''; });
+$('#service-import-form').addEventListener('submit', async (event) => { event.preventDefault(); const message = $('#data-transfer-message'); const file = $('#service-import-file').files?.[0]; if (!file) { message.textContent = '请先选择完整服务备份 JSON 文件。'; return; } if (!$('#service-import-confirm').checked) { message.textContent = '请勾选确认项后再导入。'; return; } if (file.size > 50_000_000) { message.textContent = '导入文件不能超过 50MB。'; return; } let backup; try { backup = JSON.parse(await file.text()); } catch { message.textContent = '文件不是有效的 JSON 备份。'; return; } const submit = event.currentTarget.querySelector('[type="submit"]'); submit.disabled = true; message.textContent = '正在恢复全部服务数据，请不要关闭此页面…'; try { const result = await request('/api/import', { method: 'POST', body: JSON.stringify({ ...backup, confirmReplace: true }) }); message.textContent = result.message || '完整服务数据已恢复，请重新登录。'; toast('完整服务数据已恢复。'); window.setTimeout(() => window.location.reload(), 1300); } catch (error) { message.textContent = error.message; } finally { submit.disabled = false; } });
+$('#settings-export-json-button').addEventListener('click', downloadExport); $('#new-folder-button').addEventListener('click', () => dialog('folder-dialog')); $('#notes-new-folder').addEventListener('click', () => dialog('folder-dialog')); $('#folder-form').elements.name.maxLength = 9; $('#reader-new-folder').maxLength = 9; $('#folder-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; try { await request('/api/folders', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(formElement))) }); closeDialog('folder-dialog'); formElement.reset(); toast('收藏夹已创建。'); await loadContent(); } catch (error) { $('#folder-message').textContent = error.message; } });
+$('#api-docs-button').addEventListener('click', () => window.location.assign('/api-docs.html')); $('#settings-button').addEventListener('click', () => openSettings()); $$('[data-open-settings]').forEach((button) => button.addEventListener('click', () => openSettings(button.dataset.openSettings || 'settings-account'))); $('#wx-button').addEventListener('click', () => dialog('wx-dialog'));
+$('#settings-back').addEventListener('click', async (event) => { const button = event.currentTarget; button.disabled = true; try { await closeSettingsPage(); } finally { button.disabled = false; } });
 $$('[data-settings-section]').forEach((button) => button.addEventListener('click', () => setSettingsPage(button.dataset.settingsSection)));
 let articleSearchTimer;
 $('#article-search').addEventListener('input', (event) => { const query = event.currentTarget.value.trim(); clearTimeout(articleSearchTimer); articleSearchTimer = setTimeout(() => { state.search = query; loadContent(); }, 220); });
@@ -460,7 +501,7 @@ $$('.home-view-toggle [data-view]').forEach((button) => button.addEventListener(
 }));
 $('#reader-back').addEventListener('click', closeReaderPage);
 $('#reader-refetch').addEventListener('click', async (event) => { const button = event.currentTarget; if (!state.reader) return; button.disabled = true; try { const item = await request(`/api/items/${state.reader.id}/refetch`, { method: 'POST' }); state.reader = item; await loadContent(); await openItem(item.id); toast(item.fetch_status === 'ready' ? '网页已重新抓取。' : '重新抓取失败，请查看提示或打开原文。'); } catch (error) { toast(error.message); } finally { button.disabled = false; } });
-$('#reader-read').addEventListener('click', () => updateItem({ is_read: !state.reader.is_read })); $('#reader-favorite').addEventListener('click', () => updateItem({ is_favorite: !state.reader.is_favorite })); $('#reader-archive').addEventListener('click', () => updateItem({ is_archived: !state.reader.is_archived })); $('#reader-pdf').addEventListener('click', () => { if (!state.reader?.pdf_path) return; window.open(`/archive/${encodeURIComponent(state.reader.id)}/${encodeURIComponent(state.reader.pdf_path.split(/[\\/]/).pop())}`, '_blank', 'noopener'); });
+$('#reader-read').addEventListener('click', () => updateItem({ is_read: !state.reader.is_read })); $('#reader-favorite').addEventListener('click', () => updateItem({ is_favorite: !state.reader.is_favorite })); $('#reader-archive').addEventListener('click', () => updateItem({ is_archived: !state.reader.is_archived })); $('#reader-pdf').addEventListener('click', async (event) => { if (!state.reader?.archive_path) return; const button = event.currentTarget; const target = window.open('', '_blank'); button.disabled = true; try { const item = await request(`/api/items/${state.reader.id}/pdf`, { method: 'POST' }); state.reader = item; syncReaderState(item); const filename = item.pdf_path.split(/[\\/]/).pop(); const revision = encodeURIComponent(item.updated_at || item.created_at || Date.now()); const href = `/archive/${encodeURIComponent(item.id)}/${encodeURIComponent(filename)}?v=${revision}`; if (target) { target.opener = null; target.location.replace(href); } else window.open(href, '_blank', 'noopener'); } catch (error) { target?.close(); toast(error.message); } finally { syncReaderState(state.reader); } });
 $('#reader-mode-button').addEventListener('click', () => { readerDisplay.mode = readerDisplay.mode === 'classic' ? 'minimal' : 'classic'; saveReaderDisplay(); applyReaderDisplay(); });
 $('#reader-appearance-button').addEventListener('click', () => { const panel = $('#reader-appearance'); const willOpen = panel.classList.contains('hidden'); panel.classList.toggle('hidden', !willOpen); $('#reader-appearance-button').setAttribute('aria-expanded', String(willOpen)); });
 $('#reader-appearance-close').addEventListener('click', closeReaderAppearance);
@@ -530,7 +571,7 @@ $('#highlight-popover').addEventListener('submit', async (event) => { event.prev
 $('#highlight-delete-confirm').addEventListener('click', async () => { const highlightId = pendingHighlightDelete; if (!highlightId || !state.reader) return; const button = $('#highlight-delete-confirm'); button.disabled = true; try { await request(`/api/items/${state.reader.id}/highlights/${highlightId}`, { method: 'DELETE' }); state.reader.highlights = state.reader.highlights.filter((highlight) => highlight.id !== highlightId); renderReaderContent(state.reader.html_snapshot); renderHighlights(); await loadContent(); closeDialog('highlight-delete-dialog'); pendingHighlightDelete = null; toast('高亮笔记已删除。'); } catch (error) { toast(error.message); } finally { button.disabled = false; } });
 $('#token-revoke-confirm').addEventListener('click', async () => { const tokenId = pendingTokenRevoke; if (!tokenId) return; const button = $('#token-revoke-confirm'); button.disabled = true; try { await request(`/api/tokens/${tokenId}`, { method: 'DELETE' }); closeDialog('token-revoke-dialog'); pendingTokenRevoke = null; toast('Token 已删除。'); await loadTokens(); } catch (error) { toast(error.message); } finally { button.disabled = false; } });
 $('#password-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); if (form.get('newPassword') !== form.get('confirmPassword')) { $('#password-message').textContent = '两次输入的新密码不一致。'; return; } try { await request('/api/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword: form.get('currentPassword'), newPassword: form.get('newPassword') }) }); formElement.reset(); $('#password-message').textContent = ''; toast('密码已更新。'); } catch (error) { $('#password-message').textContent = error.message; } });
-$('#settings-logout').addEventListener('click', async () => { try { await request('/api/auth/logout', { method: 'POST' }); closeSettingsPage(); $('#reader-page').classList.add('hidden'); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#login-form').reset(); state.user = null; document.body.dataset.authState = 'unauthenticated'; toast('已退出登录。'); } catch (error) { toast(error.message); } });
+$('#settings-logout').addEventListener('click', async () => { try { await request('/api/auth/logout', { method: 'POST' }); await closeSettingsPage({ refresh: false }); $('#reader-page').classList.add('hidden'); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#login-form').reset(); state.user = null; document.body.dataset.authState = 'unauthenticated'; toast('已退出登录。'); } catch (error) { toast(error.message); } });
 $('#token-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; try { const result = await request('/api/tokens', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(formElement))) }); const value = $('#new-token'); value.textContent = `新建 Token：${result.token}`; value.classList.remove('hidden'); formElement.reset(); await loadTokens(); } catch (error) { toast(error.message); } });
 $('#user-form').addEventListener('submit', async (event) => { event.preventDefault(); const formElement = event.currentTarget; try { await request('/api/users', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(formElement))) }); formElement.reset(); toast('用户已创建。'); loadUsers(); } catch (error) { toast(error.message); } });
 function workspaceRoute(name, params = new URLSearchParams()) { return `${window.location.pathname}${params.size ? `?${params}` : ''}#${name}`; }
@@ -543,7 +584,6 @@ function setWorkspaceVisibility(name) {
   $$('.nav-link').forEach((button) => button.classList.toggle('active', button.dataset.workspace === name || (name === 'articles' && button.dataset.status === state.status)));
 }
 function timelineTitle(eventType) { return ({ item_created: '收录', highlight_created: '创建笔记', note_updated: '更新笔记', item_archived: '归档', item_unarchived: '取消归档', item_favorited: '收藏', item_unfavorited: '取消收藏' })[eventType] || eventType; }
-function timelineIcon(eventType) { return ({ item_created: 'file-plus', highlight_created: 'note-plus', note_updated: 'note', item_archived: 'archive', item_unarchived: 'archive-off', item_favorited: 'star', item_unfavorited: 'star-off' })[eventType] || 'timeline'; }
 function timelineDay(value) { const date = new Date(value); return `${date.getFullYear()}年${String(date.getMonth() + 1).padStart(2, '0')}月${String(date.getDate()).padStart(2, '0')}日`; }
 function timelineTime(value) { const date = new Date(value); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; }
 function syncTimelineRoute({ replace = false } = {}) { if (state.workspace !== 'timeline') return; const params = new URLSearchParams(); if (state.timelineView !== 'cards') params.set('view', state.timelineView); if (state.timelineType !== 'all') params.set('types', state.timelineType); if (state.timelineArticleStatus !== 'all') params.set('articleStatus', state.timelineArticleStatus); history[replace ? 'replaceState' : 'pushState']({ workspace: 'timeline' }, '', workspaceRoute('timeline', params)); }
@@ -557,7 +597,6 @@ function timelineArticleDescription(entry) {
   return ({ item_created: `从 ${source} 保存链接，自动存为 HTML 档案。`, item_favorited: '文章已加入收藏，可在收藏夹中查看。', item_unfavorited: '文章已取消收藏，阅读记录与笔记保持不变。', item_archived: '阅读完成，已归档至阅读档案。', item_unarchived: '已从阅读档案恢复至未归档文章。' })[entry.event_type] || '';
 }
 function timelineCardDetail(entry) { return entry.noteEvent ? '' : timelineArticleDescription(entry); }
-function timelineActions(entry) { if (!entry.article) return ''; return `<div class="timeline-event-actions"><button type="button" data-timeline-open="${entry.article.id}">打开文章</button>${entry.article.url ? `<a href="${escapeHtml(entry.article.url)}" target="_blank" rel="noopener noreferrer">打开原文</a>` : ''}${entry.highlight ? `<button type="button" data-timeline-note="${entry.highlight.id}">查看笔记</button>` : ''}</div>`; }
 async function openTimelineNote(noteId) { try { const note = await request(`/api/notes/${noteId}`); state.noteArticleQuery = ''; state.noteQuery = ''; state.noteField = 'note'; state.noteArticleStatus = 'all'; state.selectedNoteId = note.id; openNotesWorkspace(); state.notes = [note]; state.noteTotal = 1; renderNotes(); syncNotesRoute({ replace: true }); await loadNotes(); } catch (error) { toast(error.message); } }
 function bindTimelineActions() { $$('[data-timeline-open]').forEach((button) => button.addEventListener('click', () => openItem(button.dataset.timelineOpen))); $$('[data-timeline-note]').forEach((button) => button.addEventListener('click', () => openTimelineNote(button.dataset.timelineNote))); }
 function renderTimeline() {
@@ -572,9 +611,6 @@ async function loadTimeline({ append = false } = {}) { const params = new URLSea
 function openTimeline() { setWorkspaceVisibility('timeline'); state.timelinePage = 1; state.timelineItems = []; state.timelineHasMore = false; loadTimeline(); window.scrollTo({ top: 0, behavior: 'instant' }); }
 function syncManageRoute({ replace = false } = {}) { if (state.workspace !== 'manage') return; const params = new URLSearchParams(); if (state.manageMode !== 'folders') params.set('mode', state.manageMode); if (state.manageQuery) params.set('q', state.manageQuery); if (state.manageSelectedId) params.set('selected', state.manageSelectedId); history[replace ? 'replaceState' : 'pushState']({ workspace: 'manage' }, '', workspaceRoute('manage', params)); }
 function renderManageItem(item, index, removable) { return `<article class="manage-item"><span class="manage-item-num">${String(index + 1).padStart(2, '0')}</span><button class="manage-item-main" type="button" data-manage-open-item="${item.id}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(domain(item.url))} · ${shortDate(item.created_at)}${item.tags.length ? ` · ${item.tags.map((tag) => `#${escapeHtml(tag.name)}`).join(' ')}` : ''}</span></button><div class="manage-item-tools">${removable ? `<button class="icon-button" type="button" data-manage-remove="${item.id}" aria-label="移出收藏夹" title="移出收藏夹"><i class="ti ti-folder-minus"></i></button>` : ''}<a class="icon-button" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" aria-label="打开原文" title="打开原文"><i class="ti ti-external-link"></i></a></div></article>`; }
-function renderManage() { const isFolder = state.manageMode === 'folders'; const rows = state.manageRows; $('#manage-count').textContent = `${rows.length} 个${isFolder ? '收藏夹' : '标签'}`; $('#manage-search').placeholder = isFolder ? '搜索收藏夹或文章' : '搜索标签或文章'; $('#manage-create-folder').classList.toggle('hidden', !isFolder); $('#manage-entities').innerHTML = rows.length ? rows.map((entry) => `<button class="manage-entity ${entry.id === state.manageSelectedId ? 'active' : ''}" type="button" data-manage-select="${entry.id}"><span><strong>${isFolder ? '' : '#'}${escapeHtml(entry.name)}</strong><span>${isFolder && entry.latest_item_at ? `最近加入 ${shortDate(entry.latest_item_at)}` : '关联文章'}</span></span><b>${entry.count}</b></button>`).join('') : `<section class="manage-empty"><div><i class="ti ti-${isFolder ? 'folder-off' : 'tag-off'}"></i><p>${isFolder ? '还没有收藏夹' : '文章添加标签后会在这里出现'}</p></div></section>`;
-  const detail = state.manageDetail; if (!detail) { $('#manage-detail').innerHTML = `<section class="manage-empty"><div><i class="ti ti-${isFolder ? 'folder' : 'tag'}"></i><p>选择一个${isFolder ? '收藏夹' : '标签'}后在这里查看文章。</p></div></section>`; } else { $('#manage-detail').innerHTML = `<header class="manage-detail-head"><div><p class="eyebrow">${isFolder ? '收藏夹' : '标签'}</p><h2>${isFolder ? '' : '#'}${escapeHtml(detail.name)}</h2><p class="count">${detail.total} 篇关联文章${isFolder ? ` · 创建于 ${shortDate(detail.created_at)}` : ''}</p></div><div class="manage-detail-actions"><button class="icon-button" type="button" data-manage-rename aria-label="重命名${isFolder ? '收藏夹' : '标签'}" title="重命名"><i class="ti ti-pencil"></i></button>${isFolder ? '<button class="icon-button danger-icon" type="button" data-manage-delete aria-label="删除收藏夹" title="删除收藏夹"><i class="ti ti-trash"></i></button>' : ''}</div></header><div>${detail.items.length ? detail.items.map((item, index) => renderManageItem(item, index, isFolder)).join('') : '<section class="manage-empty"><div><i class="ti ti-file-off"></i><p>这里还没有文章。</p></div></section>'}</div>`; }
-  $$('[data-manage-select]').forEach((button) => button.addEventListener('click', () => { state.manageSelectedId = button.dataset.manageSelect; loadManageDetail(); })); $$('[data-manage-open-item]').forEach((button) => button.addEventListener('click', () => openItem(button.dataset.manageOpenItem))); $$('[data-manage-remove]').forEach((button) => button.addEventListener('click', async () => { try { await request(`/api/folders/${state.manageSelectedId}/items/${button.dataset.manageRemove}`, { method: 'DELETE' }); toast('已移出收藏夹。'); await loadManage(); } catch (error) { toast(error.message); } })); $('[data-manage-rename]')?.addEventListener('click', () => openManageNameDialog('rename')); $('[data-manage-delete]')?.addEventListener('click', () => { $('#manage-folder-delete-copy').textContent = `删除“${state.manageDetail.name}”并将其中 ${state.manageDetail.total} 篇文章移出收藏夹。文章、笔记和标签都会保留。`; dialog('manage-folder-delete-dialog'); }); }
 let pendingFolderRemoval = null;
 
 function manageDetailMarkup(detail, isFolder) {

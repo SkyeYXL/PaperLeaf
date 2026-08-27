@@ -1,0 +1,32 @@
+name: aiproject
+
+services:
+  paperleaf:
+    build:
+      context: ./PaperLeaf
+      dockerfile: Dockerfile
+    container_name: PaperLeaf
+    labels:
+      com.paperleaf.version: "0.0.3"
+      com.paperleaf.api-docs: "/api-docs.html"
+      com.paperleaf.api-docs-navigation: "expandable"
+    restart: unless-stopped
+    ports:
+      - "47777:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      PAPERLEAF_DATA_DIR: /app/data
+      PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
+      PAPERLEAF_PDF_BROWSER: /usr/bin/chromium
+    volumes:
+      - ./PaperLeaf/data:/app/data
+      # 默认使用项目内 Library；若 NAS 已将文章库迁移到其他持久化位置，
+      # 通过 PAPERLEAF_NAS_LIBRARY_DIR 覆盖，升级时必须保留既有值。
+      - ${PAPERLEAF_NAS_LIBRARY_DIR:-./PaperLeaf/library}:/var/lib/paperleaf/library
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

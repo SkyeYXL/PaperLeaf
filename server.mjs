@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
@@ -22,7 +22,9 @@ const db = new DatabaseSync(join(dataDir, 'paperleaf.sqlite'));
 db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
 
 const tokenKeyPath = join(dataDir, 'token-encryption.key');
-const tokenEncryptionKey = createHash('sha256').update(process.env.PAPERLEAF_TOKEN_ENCRYPTION_KEY || (existsSync(tokenKeyPath) ? readFileSync(tokenKeyPath, 'utf8').trim() : (() => { const key = randomBytes(32).toString('base64url'); writeFileSync(tokenKeyPath, key, { mode: 0o600 }); return key; })())).digest();
+const configuredTokenSecret = process.env.PAPERLEAF_TOKEN_ENCRYPTION_KEY || '';
+let tokenEncryptionSecret = configuredTokenSecret || (existsSync(tokenKeyPath) ? readFileSync(tokenKeyPath, 'utf8').trim() : (() => { const key = randomBytes(32).toString('base64url'); writeFileSync(tokenKeyPath, key, { mode: 0o600 }); return key; })());
+let tokenEncryptionKey = createHash('sha256').update(tokenEncryptionSecret).digest();
 
 const now = () => new Date().toISOString();
 const id = (prefix) => `${prefix}_${randomBytes(12).toString('hex')}`;
@@ -37,7 +39,7 @@ function migrate() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, normalized_url));
+    CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS tags (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(user_id, name));
     CREATE TABLE IF NOT EXISTS item_tags (item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE, PRIMARY KEY(item_id, tag_id));
     CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(user_id, name));
@@ -52,6 +54,21 @@ function migrate() {
   if (!itemColumns.includes('reading_progress')) db.exec('ALTER TABLE items ADD COLUMN reading_progress REAL NOT NULL DEFAULT 0');
   if (!itemColumns.includes('last_opened_at')) db.exec('ALTER TABLE items ADD COLUMN last_opened_at TEXT');
   if (!itemColumns.includes('archive_folder')) db.exec("ALTER TABLE items ADD COLUMN archive_folder TEXT NOT NULL DEFAULT ''");
+  const itemSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='items'").get()?.sql || '';
+  if (/UNIQUE\s*\(\s*user_id\s*,\s*normalized_url\s*\)/i.test(itemSchema)) {
+    db.exec('PRAGMA foreign_keys=OFF');
+    try {
+      db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE items_repeated_capture (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archive_folder TEXT NOT NULL DEFAULT '');
+        INSERT INTO items_repeated_capture (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder)
+          SELECT id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder FROM items;
+        DROP TABLE items;
+        ALTER TABLE items_repeated_capture RENAME TO items;
+      COMMIT;`);
+    } catch (error) { try { db.exec('ROLLBACK'); } catch { /* The transaction may already have rolled back. */ } throw error; }
+    finally { db.exec('PRAGMA foreign_keys=ON'); }
+    if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('重复抓取迁移后的数据库外键校验失败。');
+  }
   const highlightColumns = db.prepare('PRAGMA table_info(highlights)').all().map((column) => column.name);
   if (!highlightColumns.includes('start_offset')) db.exec('ALTER TABLE highlights ADD COLUMN start_offset INTEGER');
   if (!highlightColumns.includes('end_offset')) db.exec('ALTER TABLE highlights ADD COLUMN end_offset INTEGER');
@@ -68,6 +85,7 @@ function migrate() {
   if (!tokenColumns.includes('token_ciphertext')) db.exec('ALTER TABLE api_tokens ADD COLUMN token_ciphertext TEXT');
   db.prepare('DELETE FROM api_tokens WHERE revoked_at IS NOT NULL').run();
   db.exec('CREATE INDEX IF NOT EXISTS idx_highlights_item_updated_at ON highlights(item_id, updated_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_items_user_normalized_url ON items(user_id, normalized_url)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_user_occurred_at ON timeline_events(user_id, occurred_at DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_item_occurred_at ON timeline_events(item_id, occurred_at DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_highlight_occurred_at ON timeline_events(highlight_id, occurred_at DESC)');
@@ -115,7 +133,7 @@ function fail(res, status, code, message) { send(res, status, { error: { code, m
 function cookies(req) { return Object.fromEntries((req.headers.cookie || '').split(';').filter(Boolean).map((part) => { const index = part.indexOf('='); return [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim())]; })); }
 function setCookie(res, value) { res.setHeader('Set-Cookie', `pl_session=${encodeURIComponent(value)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`); }
 function clearCookie(res) { res.setHeader('Set-Cookie', 'pl_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); }
-function readBody(req) { return new Promise((resolveBody, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 2_000_000) req.destroy(); }); req.on('end', () => { try { resolveBody(body ? JSON.parse(body) : {}); } catch { reject(new Error('请求体必须是 JSON。')); } }); req.on('error', reject); }); }
+function readBody(req) { return new Promise((resolveBody, reject) => { let body = ''; let tooLarge = false; req.on('data', (chunk) => { if (tooLarge) return; body += chunk; if (body.length > 50_000_000) { tooLarge = true; reject(new Error('导入文件不能超过 50MB。')); } }); req.on('end', () => { if (tooLarge) return; try { resolveBody(body ? JSON.parse(body) : {}); } catch { reject(new Error('请求体必须是 JSON。')); } }); req.on('error', reject); }); }
 function unwrapWechatArticleUrl(input) {
   const parsed = new URL(input);
   if (parsed.hostname.toLowerCase() !== 'mp.weixin.qq.com' || parsed.pathname !== '/mp/wappoc_appmsgcaptcha') return parsed.toString();
@@ -165,6 +183,12 @@ async function fetchPage(input) {
     return { url, ...page };
   }
   throw new Error('重定向次数过多。');
+}
+function clientSnapshotPage(payload, sourceUrl) {
+  const source = String(payload?.htmlSnapshot || '').trim();
+  if (!source) return null;
+  const page = sanitizeDocument(source, sourceUrl);
+  return page.textLength || page.imageCount ? { url: sourceUrl, ...page } : null;
 }
 function textOnly(value = '') { return String(value).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
 function safeImageUrl(value, baseUrl) {
@@ -340,6 +364,44 @@ async function createMissingArchivePdfs({ force = false } = {}) {
     catch (error) { console.warn(`PDF archive skipped for ${item.id}: ${error.message}`); }
   }
 }
+async function createItemPdf(item) {
+  if (!item || item.fetch_status !== 'ready' || !String(item.html_snapshot || '').trim()) throw new Error('文章尚未生成可用的 HTML 档案。');
+  const archive = archiveInfo(item, archiveUser(item.user_id));
+  const documentPath = join(archive.directory, archive.documentFile);
+  if (!existsSync(documentPath)) throw new Error('文章 HTML 档案不存在，请先重新抓取文章。');
+  await createArchivePdf(archive.directory, archive, readFileSync(documentPath, 'utf8'), { title: item.title, url: item.url });
+  return itemData(itemForUser(item.user_id, item.id));
+}
+let monitoredLibraryFingerprint = null;
+function libraryFingerprint() {
+  if (!existsSync(archiveDir)) return `missing:${archiveDir}`;
+  try {
+    const root = statSync(archiveDir);
+    const children = readdirSync(archiveDir).sort().map((entry) => {
+      try { const stat = statSync(join(archiveDir, entry)); return `${entry}:${stat.mtimeMs}:${stat.size}`; }
+      catch { return `${entry}:missing`; }
+    });
+    return `${archiveDir}:${root.mtimeMs}|${children.join('|')}`;
+  } catch { return `unreadable:${archiveDir}`; }
+}
+function noteLibraryMutation() {
+  if (monitoredLibraryFingerprint !== null) monitoredLibraryFingerprint = libraryFingerprint();
+}
+function startLibraryMonitor() {
+  monitoredLibraryFingerprint = libraryFingerprint(); let running = false;
+  const scan = async () => {
+    if (running) return;
+    const current = libraryFingerprint();
+    if (current === monitoredLibraryFingerprint) return;
+    running = true;
+    try {
+      const items = db.prepare("SELECT * FROM items WHERE fetch_status='ready' ORDER BY created_at,id").all();
+      for (const item of items) { try { await refetchItem(item); } catch (error) { console.warn(`Library scan skipped ${item.id}: ${error.message}`); } }
+    } finally { monitoredLibraryFingerprint = libraryFingerprint(); running = false; }
+  };
+  const timer = setInterval(() => { void scan(); }, 60 * 60 * 1000);
+  timer.unref?.();
+}
 function archiveAssetUrl(itemId, filename) { return `/archive/${encodeURIComponent(itemId)}/${encodeURIComponent(filename)}`; }
 function archiveImageExtension(contentType, sourceUrl) {
   const type = String(contentType || '').toLowerCase().split(';')[0];
@@ -364,7 +426,7 @@ function pdfChromium() {
 function pdfDocument(snapshot, metadata, staging) {
   const localSnapshot = snapshot.replace(/\bsrc=(['"])\/archive\/[^/]+\/([^'"]+)\1/gi, 'src="$2"');
   const source = metadata.url ? `<p class="meta">原文：${html(metadata.url)}</p>` : '';
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><base href="${html(pathToFileURL(`${staging}${sep}`).href)}"><title>${html(metadata.title || '未命名文章')}</title><style>@page{size:A4;margin:18mm 16mm}body{color:#28231b;font:16px/1.8 "Songti SC",Georgia,"Times New Roman",serif}h1{font:700 26px/1.35 system-ui,"Microsoft YaHei",sans-serif;margin:0 0 10px}.meta{color:#6d624e;font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif;border-bottom:1px solid #d7c9aa;padding-bottom:12px;margin:0 0 28px;word-break:break-all}img{display:block;max-width:100%;height:auto;margin:16px auto}pre{white-space:pre-wrap;word-break:break-word}table{max-width:100%;border-collapse:collapse}th,td{border:1px solid #cfc4ab;padding:6px;vertical-align:top}</style></head><body><h1>${html(metadata.title || '未命名文章')}</h1>${source}<article>${localSnapshot}</article></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><base href="${html(pathToFileURL(`${staging}${sep}`).href)}"><title>${html(metadata.title || '未命名文章')}</title><style>@page{size:A4;margin:18mm 16mm}body{color:#28231b;font:16px/1.8 "Noto Serif CJK SC","Noto Serif CJK","Songti SC",Georgia,"Times New Roman",serif}h1{font:700 26px/1.35 "Noto Sans CJK SC","Noto Sans CJK",system-ui,"Microsoft YaHei",sans-serif;margin:0 0 10px}.meta{color:#6d624e;font:13px/1.6 "Noto Sans CJK SC","Noto Sans CJK",system-ui,"Microsoft YaHei",sans-serif;border-bottom:1px solid #d7c9aa;padding-bottom:12px;margin:0 0 28px;word-break:break-all}img{display:block;max-width:100%;height:auto;margin:16px auto}pre{white-space:pre-wrap;word-break:break-word}table{max-width:100%;border-collapse:collapse}th,td{border:1px solid #cfc4ab;padding:6px;vertical-align:top}</style></head><body><h1>${html(metadata.title || '未命名文章')}</h1>${source}<article>${localSnapshot}</article></body></html>`;
 }
 async function createArchivePdf(staging, archive, snapshot, metadata = {}) {
   const executable = pdfBrowserExecutable();
@@ -439,6 +501,7 @@ async function archiveSnapshot(userId, itemId, snapshot, archive = null, metadat
       }
     }
     rmSync(staging, { recursive: true, force: true });
+    noteLibraryMutation();
     return localSnapshot;
   } catch (error) {
     if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
@@ -475,15 +538,6 @@ function sanitizeDocument(source, baseUrl) {
   const imageCount = (safe.match(/<img\b/gi) || []).length;
   const summary = textOnly(description).trim() || text.slice(0, 100);
   return { title: textOnly(title).slice(0, 300), summary: summary.slice(0, 420), snapshot: safe.trim() || '<p>未提取到可阅读的正文。</p>', textLength: text.length, imageCount };
-}
-function repairVerificationSnapshots() {
-  const rows = db.prepare("SELECT id,url,normalized_url,html_snapshot FROM items WHERE fetch_status='ready'").all();
-  for (const item of rows) {
-    if (!isVerificationPage(item.html_snapshot, item.url) && !/wappoc_appmsgcaptcha/i.test(item.url)) continue;
-    const articleUrl = unwrapWechatArticleUrl(item.url);
-    db.prepare('UPDATE items SET url=?,normalized_url=?,fetch_status=?,fetch_error=?,updated_at=? WHERE id=?')
-      .run(articleUrl, normalizedUrl(articleUrl), 'failed', '此前保存的是微信验证页，不是文章正文。请重新抓取原始文章链接。', now(), item.id);
-  }
 }
 function audit(userId, action, targetId = null) { db.prepare('INSERT INTO audit_logs (id,user_id,action,target_id,created_at) VALUES (?,?,?,?,?)').run(id('log'), userId, action, targetId, now()); }
 function timelineEvent(userId, itemId, eventType, highlightId = null, occurredAt = now()) {
@@ -646,15 +700,16 @@ function preferencesForUser(userId) {
 }
 function addFolders(userId, itemId, folderIds) { for (const folderId of folderIds || []) if (db.prepare('SELECT id FROM folders WHERE id=? AND user_id=?').get(folderId, userId)) db.prepare('INSERT OR IGNORE INTO item_folders (item_id,folder_id) VALUES (?,?)').run(itemId, folderId); }
 async function createItem(userId, payload) {
-  const normalized = normalizedUrl(payload.url); const existing = db.prepare('SELECT * FROM items WHERE user_id=? AND normalized_url=?').get(userId, normalized);
-  if (existing) return { duplicate: true, item: itemData(existing) };
+  const normalized = normalizedUrl(payload.url);
   const itemId = id('itm'); const time = now(); let page;
   try { page = await fetchPage(normalized); }
-  catch (error) { page = { url: normalized, title: payload.title || new URL(normalized).hostname, summary: '', snapshot: '', error: error.message }; }
+  catch (error) { page = clientSnapshotPage(payload, normalized) || { url: normalized, title: payload.title || new URL(normalized).hostname, summary: '', snapshot: '', error: error.message }; }
+  const customTitle = String(payload.title || '').trim().slice(0, 300); if (customTitle) page.title = customTitle;
   const draft = { id: itemId, user_id: userId, title: page.title, archive_folder: '' };
   const archiveFolder = archiveFolderFor(draft);
   const archive = archiveInfo(draft, archiveUser(userId), archiveFolder);
-  if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(userId, itemId, page.snapshot, archive, { title: page.title, url: page.url });
+  // Saving a link always keeps the HTML and local assets in Library. PDF creation is explicit from the reader toolbar.
+  if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(userId, itemId, page.snapshot, archive);
   db.exec('BEGIN');
   try {
     db.prepare('INSERT INTO items (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,archive_folder,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -673,7 +728,7 @@ async function refetchItem(item) {
   const user = archiveUser(item.user_id);
   const archiveFolder = !page.error ? archiveFolderFor({ ...item, archive_folder: '', title: page.title }, page.title) : item.archive_folder;
   const archive = !page.error ? moveArchiveDirectory(item, user, archiveFolder) : archiveInfo(item, user);
-  if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(item.user_id, item.id, page.snapshot, archive, { title: page.title, url: page.url });
+  if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(item.user_id, item.id, page.snapshot, archive);
   db.prepare('UPDATE items SET url=?,title=?,summary=?,html_snapshot=?,fetch_status=?,fetch_error=?,archive_folder=?,updated_at=? WHERE id=?')
     .run(page.url, page.title, page.summary, page.snapshot, page.error ? 'failed' : 'ready', page.error || null, archive.folder, time, item.id);
   return itemData(itemForUser(item.user_id, item.id));
@@ -685,7 +740,7 @@ function cors(req, res) { if (req.headers.origin?.startsWith('chrome-extension:/
 async function api(req, res, url) {
   cors(req, res); if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
   const path = url.pathname;
-  if (path === '/api/health') return ok(res, { status: 'ok', version: '0.0.2' });
+  if (path === '/api/health') return ok(res, { status: 'ok', version: '0.0.3' });
   if (path === '/api/auth/login' && req.method === 'POST') { const body = await readBody(req); const user = db.prepare('SELECT * FROM users WHERE username=?').get(String(body.username || '').trim()); if (!user || user.disabled || !(await passwordMatches(String(body.password || ''), user.password_hash))) return fail(res, 401, 'INVALID_CREDENTIALS', '用户名或密码错误。'); const sessionId = id('ses'); db.prepare('INSERT INTO sessions (id,user_id,expires_at,created_at) VALUES (?,?,?,?)').run(sessionId, user.id, new Date(Date.now() + 7 * 864e5).toISOString(), now()); setCookie(res, sessionId); audit(user.id, 'auth.login'); return ok(res, { id: user.id, username: user.username, role: user.role }); }
   if (path === '/api/auth/logout' && req.method === 'POST') { const session = cookies(req).pl_session; if (session) db.prepare('DELETE FROM sessions WHERE id=?').run(session); clearCookie(res); return ok(res, { loggedOut: true }); }
   if (path === '/api/auth/me' && req.method === 'GET') { const user = requireUser(req, res); if (user) ok(res, user); return; }
@@ -726,7 +781,9 @@ async function api(req, res, url) {
   if (path === '/api/items' && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const result = await createItem(user.id, await readBody(req)); return ok(res, result, result.duplicate ? 200 : 201); }
   const itemMatch = path.match(/^\/api\/items\/([^/]+)$/);
   const refetchMatch = path.match(/^\/api\/items\/([^/]+)\/refetch$/);
+  const pdfMatch = path.match(/^\/api\/items\/([^/]+)\/pdf$/);
   if (refetchMatch && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const item = itemForUser(user.id, refetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); return ok(res, await refetchItem(item)); }
+  if (pdfMatch && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const item = itemForUser(user.id, pdfMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); try { return ok(res, await createItemPdf(item)); } catch (error) { return fail(res, 409, 'PDF_UNAVAILABLE', error.message); } }
   if (itemMatch) {
     const user = requireUser(req, res); if (!user) return;
     const item = itemForUser(user.id, itemMatch[1]);
@@ -782,12 +839,80 @@ async function api(req, res, url) {
   if (path === '/api/tokens') { const user = requireUser(req, res); if (!user) return; if (req.method === 'GET') return ok(res, db.prepare('SELECT id,name,token_ciphertext,scopes,created_at,last_used_at FROM api_tokens WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at DESC').all(user.id).map((row) => ({ ...row, token: decryptToken(row.token_ciphertext), scopes: parse(row.scopes) }))); if (req.method === 'POST') { const body = await readBody(req); const token = `pl_${randomBytes(24).toString('base64url')}`; const tokenId = id('tok'); const scopes = ['items:read', 'items:write']; db.prepare('INSERT INTO api_tokens (id,user_id,name,token_hash,token_ciphertext,scopes,created_at) VALUES (?,?,?,?,?,?,?)').run(tokenId, user.id, String(body.name || '未命名 Token').slice(0, 80), tokenHash(token), encryptToken(token), json(scopes), now()); audit(user.id, 'token.create', tokenId); return ok(res, { id: tokenId, token, scopes }, 201); } }
   const tokenMatch = path.match(/^\/api\/tokens\/([^/]+)$/);
   if (tokenMatch && req.method === 'DELETE') { const user = requireUser(req, res); if (!user) return; const result = db.prepare('DELETE FROM api_tokens WHERE id=? AND user_id=?').run(tokenMatch[1], user.id); if (!result.changes) return fail(res, 404, 'NOT_FOUND', '未找到 Token。'); audit(user.id, 'token.delete', tokenMatch[1]); return ok(res, { deleted: true }); }
-  if (path === '/api/export' && req.method === 'GET') { const user = requireUser(req, res); if (!user) return; const data = listItems(user.id, new URLSearchParams()).items.map(({ html_snapshot, highlights, ...item }) => item); if (url.searchParams.get('format') === 'csv') { const columns = ['title', 'url', 'fetch_status', 'is_read', 'is_archived', 'is_favorite', 'tags', 'folders', 'created_at']; const csv = [columns.join(','), ...data.map((item) => columns.map((column) => { const value = ['tags', 'folders'].includes(column) ? item[column].map((entry) => entry.name).join('|') : item[column]; return `"${String(value ?? '').replaceAll('"', '""')}"`; }).join(','))].join('\n'); res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="paperleaf-export.csv"' }); return res.end(`\ufeff${csv}`); } res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="paperleaf-export.json"' }); return res.end(JSON.stringify({ version: '0.0.2', exportedAt: now(), items: data }, null, 2)); }
-  if (path === '/api/import' && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const body = await readBody(req); const urls = Array.isArray(body.urls) ? body.urls.slice(0, 50) : []; const results = []; for (const value of urls) { try { const result = await createItem(user.id, { url: value, tags: body.tags || [], folderId: body.folderId }); results.push({ url: value, success: true, duplicate: result.duplicate, id: result.item.id }); } catch (error) { results.push({ url: value, success: false, error: error.message }); } } return ok(res, { total: urls.length, successful: results.filter((result) => result.success).length, results }); }
-  if (path === '/api/users') { const user = requireUser(req, res); if (!user || user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '需要管理员权限。'); if (req.method === 'GET') return ok(res, db.prepare('SELECT id,username,role,disabled,created_at,updated_at FROM users ORDER BY created_at').all().map((row) => ({ ...row, disabled: Boolean(row.disabled) }))); if (req.method === 'POST') { const body = await readBody(req); const username = String(body.username || '').trim(); if (!/^[a-zA-Z0-9_-]{3,40}$/.test(username) || String(body.password || '').length < 12) return fail(res, 400, 'INVALID_USER', '用户名为 3-40 位字母、数字、下划线或连字符，密码至少 12 位。'); const userId = id('usr'); try { db.prepare('INSERT INTO users (id,username,password_hash,role,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(userId, username, await passwordHash(body.password), body.role === 'admin' ? 'admin' : 'user', now(), now()); } catch { return fail(res, 409, 'DUPLICATE_USER', '用户名已存在。'); } audit(user.id, 'user.create', userId); return ok(res, db.prepare('SELECT id,username,role,disabled,created_at FROM users WHERE id=?').get(userId), 201); } }
+  if (path === '/api/export' && req.method === 'GET') {
+    const user = requireUser(req, res); if (!user) return;
+    if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导出。');
+    const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events'];
+    const tables = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+    const payload = { format: 'paperleaf-service-backup', version: '0.0.3', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。' }, tables };
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="paperleaf-service-backup-${new Date().toISOString().slice(0, 10)}.json"` });
+    return res.end(JSON.stringify(payload, null, 2));
+  }
+  if (path === '/api/import' && req.method === 'POST') {
+    const user = requireUser(req, res); if (!user) return;
+    if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导入。');
+    const body = await readBody(req);
+    const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events'];
+    if (body?.format !== 'paperleaf-service-backup' || !body.tables || body.confirmReplace !== true || !tableNames.every((table) => Array.isArray(body.tables[table]))) return fail(res, 400, 'INVALID_BACKUP', '请选择有效的完整服务备份文件，并确认覆盖当前全部服务数据。');
+    if (!body.tables.users.some((entry) => entry && entry.role === 'admin' && !entry.disabled)) return fail(res, 400, 'INVALID_BACKUP', '备份中至少需要保留一个启用的管理员账号。');
+    const backupKey = String(body.system?.tokenEncryptionKey || '');
+    if (configuredTokenSecret && backupKey) return fail(res, 400, 'TOKEN_KEY_MANAGED', '当前服务使用环境变量管理 Token 加密密钥，不能导入含独立密钥的备份。');
+    if (!configuredTokenSecret && !backupKey && body.tables.api_tokens.length) return fail(res, 400, 'MISSING_TOKEN_KEY', '该备份缺少 Token 加密密钥，无法安全恢复 API Token。');
+    const columns = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)]));
+    if (!tableNames.every((table) => body.tables[table].every((row) => row && typeof row === 'object' && columns[table].every((column) => Object.hasOwn(row, column))))) return fail(res, 400, 'INVALID_BACKUP', '备份数据结构与当前服务版本不兼容。');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      ['sessions', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`));
+      tableNames.forEach((table) => {
+        if (!body.tables[table].length) return;
+        const names = columns[table]; const statement = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`);
+        body.tables[table].forEach((row) => statement.run(...names.map((name) => row[name])));
+      });
+      if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('备份数据的关联关系校验失败。');
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch { /* Transaction has already ended. */ } return fail(res, 400, 'IMPORT_FAILED', `导入失败：${error.message}`); }
+    if (!configuredTokenSecret && backupKey) { writeFileSync(tokenKeyPath, backupKey, { mode: 0o600 }); tokenEncryptionSecret = backupKey; tokenEncryptionKey = createHash('sha256').update(backupKey).digest(); }
+    clearCookie(res);
+    return ok(res, { imported: true, counts: Object.fromEntries(tableNames.map((table) => [table, body.tables[table].length])), message: '完整服务数据已恢复。请使用备份中的账号重新登录。' });
+  }
+  if (path === '/api/users') { const user = requireUser(req, res); if (!user || user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '需要管理员权限。'); if (req.method === 'GET') return ok(res, db.prepare('SELECT id,username,role,disabled,created_at,updated_at FROM users ORDER BY created_at').all().map((row) => ({ ...row, disabled: Boolean(row.disabled) }))); if (req.method === 'POST') { const body = await readBody(req); const username = String(body.username || '').trim(); if (!/^[a-zA-Z0-9_-]{3,40}$/.test(username) || !String(body.password || '')) return fail(res, 400, 'INVALID_USER', '用户名为 3-40 位字母、数字、下划线或连字符，密码不能为空。'); const userId = id('usr'); try { db.prepare('INSERT INTO users (id,username,password_hash,role,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(userId, username, await passwordHash(body.password), body.role === 'admin' ? 'admin' : 'user', now(), now()); } catch { return fail(res, 409, 'DUPLICATE_USER', '用户名已存在。'); } audit(user.id, 'user.create', userId); return ok(res, db.prepare('SELECT id,username,role,disabled,created_at FROM users WHERE id=?').get(userId), 201); } }
   const userMatch = path.match(/^\/api\/users\/([^/]+)$/);
-  if (userMatch && req.method === 'PATCH') { const user = requireUser(req, res); if (!user || user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '需要管理员权限。'); const body = await readBody(req); if (typeof body.disabled !== 'boolean') return fail(res, 400, 'INVALID_USER', '缺少 disabled 状态。'); if (user.id === userMatch[1] && body.disabled) return fail(res, 400, 'INVALID_USER', '不能禁用当前登录管理员。'); db.prepare('UPDATE users SET disabled=?,updated_at=? WHERE id=?').run(Number(body.disabled), now(), userMatch[1]); audit(user.id, 'user.disable', userMatch[1]); return ok(res, { updated: true }); }
+  if (userMatch && req.method === 'DELETE') { const user = requireUser(req, res); if (!user || user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '需要管理员权限。'); if (user.id === userMatch[1]) return fail(res, 400, 'INVALID_USER', '不能删除当前登录管理员。'); const target = db.prepare('SELECT id FROM users WHERE id=?').get(userMatch[1]); if (!target) return fail(res, 404, 'NOT_FOUND', '未找到该用户。'); db.exec('BEGIN'); try { db.prepare('DELETE FROM audit_logs WHERE user_id=?').run(target.id); db.prepare('DELETE FROM users WHERE id=?').run(target.id); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'user.delete', target.id); return ok(res, { deleted: true }); }
+  // Public Token API: module names are intentionally stable even though the internal tables retain their original names.
+  if (path === '/api/v1/bookmarks') { const user = tokenUser(req, req.method === 'POST' ? ['items:write'] : ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method === 'GET') return ok(res, listItems(user.id, url.searchParams)); if (req.method === 'POST') return ok(res, await createItem(user.id, await readBody(req)), 201); return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的书签操作。'); }
+  const v1BookmarkStateMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)\/(favorite|archive)$/);
+  if (v1BookmarkStateMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 执行文章状态操作。'); const item = itemForUser(user.id, v1BookmarkStateMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该文章。'); const action = v1BookmarkStateMatch[2]; const field = action === 'favorite' ? 'is_favorite' : 'is_archived'; const event = action === 'favorite' ? 'item_favorited' : 'item_archived'; db.exec('BEGIN'); try { db.prepare(`UPDATE items SET ${field}=1,updated_at=? WHERE id=?`).run(now(), item.id); if (!Boolean(item[field])) timelineEvent(user.id, item.id, event, null); db.exec('COMMIT'); } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } audit(user.id, `bookmark.${action}`, item.id); return ok(res, itemData(itemForUser(user.id, item.id))); }
+  const v1BookmarkRefetchMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)\/refetch$/);
+  if (v1BookmarkRefetchMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkRefetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 重新抓取。'); return ok(res, await refetchItem(item)); }
+  const v1BookmarkMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)$/);
+  if (v1BookmarkMatch) {
+    const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。');
+    if (req.method === 'GET') return ok(res, itemData(item));
+    if (req.method === 'PATCH') { const body = await readBody(req); const fields = []; const values = []; const timestamp = now(); for (const key of ['is_read', 'is_archived', 'is_favorite']) if (typeof body[key] === 'boolean') { fields.push(`${key}=?`); values.push(Number(body[key])); } if (body.last_opened === true) { fields.push('last_opened_at=?'); values.push(timestamp); } if (Number.isFinite(body.reading_progress)) { fields.push('reading_progress=?'); values.push(Math.min(1, Math.max(0, Number(body.reading_progress)))); } const title = typeof body.title === 'string' ? body.title.trim().slice(0, 300) : null; if (title !== null) { fields.push('title=?'); values.push(title); } if (typeof body.summary === 'string') { fields.push('summary=?'); values.push(body.summary.trim().slice(0, 2000)); } if (title !== null && title !== item.title) { const folder = archiveFolderFor({ ...item, archive_folder: '', title }, title); moveArchiveDirectory(item, archiveUser(user.id), folder); fields.push('archive_folder=?'); values.push(folder); } db.exec('BEGIN'); try { if (fields.length) { fields.push('updated_at=?'); values.push(timestamp, item.id); db.prepare(`UPDATE items SET ${fields.join(',')} WHERE id=?`).run(...values); } if (typeof body.is_archived === 'boolean' && body.is_archived !== Boolean(item.is_archived)) timelineEvent(user.id, item.id, body.is_archived ? 'item_archived' : 'item_unarchived', null, timestamp); if (typeof body.is_favorite === 'boolean' && body.is_favorite !== Boolean(item.is_favorite)) timelineEvent(user.id, item.id, body.is_favorite ? 'item_favorited' : 'item_unfavorited', null, timestamp); if (Array.isArray(body.tags)) { db.prepare('DELETE FROM item_tags WHERE item_id=?').run(item.id); addTags(user.id, item.id, body.tags); clearOrphanTags(user.id); } if (Array.isArray(body.collectionIds)) { db.prepare('DELETE FROM item_folders WHERE item_id=?').run(item.id); addFolders(user.id, item.id, body.collectionIds); } db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'bookmark.update', item.id); return ok(res, itemData(itemForUser(user.id, item.id))); }
+    if (req.method === 'DELETE') { const archive = archiveInfo(item, archiveUser(user.id)); db.exec('BEGIN'); try { db.prepare('DELETE FROM timeline_events WHERE user_id=? AND item_id=?').run(user.id, item.id); db.prepare('DELETE FROM highlights WHERE item_id=?').run(item.id); db.prepare('DELETE FROM items WHERE id=?').run(item.id); clearItemArchive(user.id, item.id, archive); clearOrphanTags(user.id); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'bookmark.delete', item.id); return ok(res, { deleted: true }); }
+    return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的书签操作。');
+  }
+  const v1BookmarkHighlightMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)\/highlights$/);
+  if (v1BookmarkHighlightMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkHighlightMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 创建高亮笔记。'); const body = await readBody(req); const text = String(body.text || '').trim(); const title = String(body.title || '').trim(); const note = String(body.note || '').trim(); if (!text) return fail(res, 400, 'INVALID_HIGHLIGHT', '高亮内容不能为空。'); if (!title || title.length > 120) return fail(res, 400, 'INVALID_NOTE_TITLE', '笔记标题为 1-120 字符。'); if (!note || note.length > 1000) return fail(res, 400, 'INVALID_NOTE', '笔记正文为 1-1000 字符。'); const highlightId = id('hlt'); const timestamp = now(); db.exec('BEGIN'); try { db.prepare('INSERT INTO highlights (id,item_id,text,note_title,note,color,start_offset,end_offset,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(highlightId, item.id, text.slice(0, 4000), title, note, 'yellow', null, null, timestamp, timestamp); timelineEvent(user.id, item.id, 'highlight_created', highlightId, timestamp); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'highlight.create', highlightId); return ok(res, noteData(noteForUser(user.id, highlightId)), 201); }
+  if (path === '/api/v1/highlights') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 GET 读取高亮笔记。'); return ok(res, listNotes(user.id, url.searchParams)); }
+  const v1HighlightDetailMatch = path.match(/^\/api\/v1\/highlights\/([^/]+)$/);
+  if (v1HighlightDetailMatch) { const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const highlight = noteForUser(user.id, v1HighlightDetailMatch[1]); if (!highlight) return fail(res, 404, 'NOT_FOUND', '未找到该高亮笔记。'); if (req.method === 'GET') return ok(res, noteData(highlight)); if (req.method === 'PATCH') { const body = await readBody(req); const title = typeof body.title === 'string' ? body.title.trim() : ''; const note = typeof body.note === 'string' ? body.note.trim() : ''; if (!title || title.length > 120) return fail(res, 400, 'INVALID_NOTE_TITLE', '笔记标题为 1-120 字符。'); if (!note || note.length > 1000) return fail(res, 400, 'INVALID_NOTE', '笔记正文为 1-1000 字符。'); if (typeof body.updatedAt !== 'string' || !body.updatedAt) return fail(res, 400, 'INVALID_NOTE_VERSION', '缺少笔记更新时间。'); const timestamp = now(); const result = db.prepare('UPDATE highlights SET note_title=?,note=?,updated_at=? WHERE id=? AND updated_at=?').run(title, note, timestamp, highlight.id, body.updatedAt); if (result.changes !== 1) return fail(res, 409, 'NOTE_CONFLICT', '笔记已在其他位置更新。'); timelineEvent(user.id, highlight.item_id, 'note_updated', highlight.id, timestamp); audit(user.id, 'highlight.update', highlight.id); return ok(res, noteData(noteForUser(user.id, highlight.id))); } if (req.method === 'DELETE') { db.exec('BEGIN'); try { db.prepare('DELETE FROM timeline_events WHERE user_id=? AND highlight_id=?').run(user.id, highlight.id); db.prepare('DELETE FROM highlights WHERE id=?').run(highlight.id); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'highlight.delete', highlight.id); return ok(res, { deleted: true }); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的高亮笔记操作。'); }
+  if (path === '/api/v1/tags') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 GET 读取标签。'); return ok(res, tagSummary(user.id, url.searchParams)); }
+  const v1TagMatch = path.match(/^\/api\/v1\/tags\/([^/]+)$/);
+  if (v1TagMatch) { const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const tag = db.prepare('SELECT * FROM tags WHERE id=? AND user_id=?').get(v1TagMatch[1], user.id); if (!tag) return fail(res, 404, 'NOT_FOUND', '未找到标签。'); if (req.method === 'GET') return ok(res, tagDetail(user.id, tag.id, url.searchParams)); if (req.method === 'PATCH') { const body = await readBody(req); const name = normalizedName(body.name, { tag: true, maxLength: 40 }); if (!name) return fail(res, 400, 'INVALID_TAG', '标签名称为 1-40 个非空白字符，且不能包含空格或控制字符。'); try { db.prepare('UPDATE tags SET name=? WHERE id=? AND user_id=?').run(name, tag.id, user.id); } catch { return fail(res, 409, 'DUPLICATE_TAG', '已存在同名标签。'); } audit(user.id, 'tag.rename', tag.id); return ok(res, db.prepare('SELECT id,name,created_at FROM tags WHERE id=?').get(tag.id)); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的标签操作。'); }
+  if (path === '/api/v1/collections') { const user = tokenUser(req, req.method === 'POST' ? ['items:write'] : ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method === 'GET') return ok(res, folderSummary(user.id, url.searchParams)); if (req.method === 'POST') { const body = await readBody(req); const name = normalizedName(body.name, { maxLength: 9 }); if (!name) return fail(res, 400, 'INVALID_COLLECTION', '收藏夹名称为 1-9 个字符，且不能包含控制字符。'); const collectionId = id('fld'); try { db.prepare('INSERT INTO folders (id,user_id,name,sort_order,created_at) VALUES (?,?,?,?,?)').run(collectionId, user.id, name, Number(body.sortOrder || 0), now()); } catch { return fail(res, 409, 'DUPLICATE_COLLECTION', '已存在同名收藏夹。'); } audit(user.id, 'collection.create', collectionId); return ok(res, db.prepare('SELECT * FROM folders WHERE id=?').get(collectionId), 201); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的收藏夹操作。'); }
+  const v1CollectionBookmarkMatch = path.match(/^\/api\/v1\/collections\/([^/]+)\/bookmarks\/([^/]+)$/);
+  if (v1CollectionBookmarkMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'DELETE') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 DELETE 移出收藏夹。'); const collection = db.prepare('SELECT id FROM folders WHERE id=? AND user_id=?').get(v1CollectionBookmarkMatch[1], user.id); const item = itemForUser(user.id, v1CollectionBookmarkMatch[2]); if (!collection || !item) return fail(res, 404, 'NOT_FOUND', '未找到收藏夹或书签。'); const result = db.prepare('DELETE FROM item_folders WHERE folder_id=? AND item_id=?').run(collection.id, item.id); if (!result.changes) return fail(res, 404, 'NOT_FOUND', '书签不在该收藏夹中。'); audit(user.id, 'collection.bookmark.remove', collection.id); return ok(res, { removed: true }); }
+  const v1CollectionMatch = path.match(/^\/api\/v1\/collections\/([^/]+)$/);
+  if (v1CollectionMatch) { const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const collection = db.prepare('SELECT * FROM folders WHERE id=? AND user_id=?').get(v1CollectionMatch[1], user.id); if (!collection) return fail(res, 404, 'NOT_FOUND', '未找到收藏夹。'); if (req.method === 'GET') return ok(res, folderDetail(user.id, collection.id, url.searchParams)); if (req.method === 'PATCH') { const body = await readBody(req); const name = normalizedName(body.name, { maxLength: 9 }); if (!name) return fail(res, 400, 'INVALID_COLLECTION', '收藏夹名称为 1-9 个字符，且不能包含控制字符。'); try { db.prepare('UPDATE folders SET name=? WHERE id=?').run(name, collection.id); } catch { return fail(res, 409, 'DUPLICATE_COLLECTION', '已存在同名收藏夹。'); } audit(user.id, 'collection.rename', collection.id); return ok(res, db.prepare('SELECT * FROM folders WHERE id=?').get(collection.id)); } if (req.method === 'DELETE') { const removed = db.prepare('SELECT count(*) AS total FROM item_folders WHERE folder_id=?').get(collection.id).total; db.prepare('DELETE FROM folders WHERE id=?').run(collection.id); audit(user.id, 'collection.delete', collection.id); return ok(res, { deleted: true, removed }); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的收藏夹操作。'); }
+  if (path === '/api/v1/timeline') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 GET 读取时间轴。'); return ok(res, listTimeline(user.id, url.searchParams)); }
+  if (path === '/api/v1/data/export' && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导出。'); const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events']; const tables = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])); const payload = { format: 'paperleaf-service-backup', version: '0.0.3', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。' }, tables }; res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="paperleaf-service-backup-${new Date().toISOString().slice(0, 10)}.json"` }); return res.end(JSON.stringify(payload, null, 2)); }
+  if (path === '/api/v1/data/import' && req.method === 'POST') { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导入。'); const body = await readBody(req); const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events']; if (body?.format !== 'paperleaf-service-backup' || !body.tables || body.confirmReplace !== true || !tableNames.every((table) => Array.isArray(body.tables[table]))) return fail(res, 400, 'INVALID_BACKUP', '请选择有效的完整服务备份文件，并确认覆盖当前全部服务数据。'); if (!body.tables.users.some((entry) => entry && entry.role === 'admin' && !entry.disabled)) return fail(res, 400, 'INVALID_BACKUP', '备份中至少需要保留一个启用的管理员账号。'); const backupKey = String(body.system?.tokenEncryptionKey || ''); if (configuredTokenSecret && backupKey) return fail(res, 400, 'TOKEN_KEY_MANAGED', '当前服务使用环境变量管理 Token 加密密钥，不能导入含独立密钥的备份。'); if (!configuredTokenSecret && !backupKey && body.tables.api_tokens.length) return fail(res, 400, 'MISSING_TOKEN_KEY', '该备份缺少 Token 加密密钥，无法安全恢复 API Token。'); const columns = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)])); if (!tableNames.every((table) => body.tables[table].every((row) => row && typeof row === 'object' && columns[table].every((column) => Object.hasOwn(row, column))))) return fail(res, 400, 'INVALID_BACKUP', '备份数据结构与当前服务版本不兼容。'); db.exec('BEGIN IMMEDIATE'); try { ['sessions', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`)); tableNames.forEach((table) => { if (!body.tables[table].length) return; const names = columns[table]; const statement = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`); body.tables[table].forEach((row) => statement.run(...names.map((name) => row[name]))); }); if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('备份数据的关联关系校验失败。'); db.exec('COMMIT'); } catch (error) { try { db.exec('ROLLBACK'); } catch {} return fail(res, 400, 'IMPORT_FAILED', `导入失败：${error.message}`); } if (!configuredTokenSecret && backupKey) { writeFileSync(tokenKeyPath, backupKey, { mode: 0o600 }); tokenEncryptionSecret = backupKey; tokenEncryptionKey = createHash('sha256').update(backupKey).digest(); } clearCookie(res); return ok(res, { imported: true, counts: Object.fromEntries(tableNames.map((table) => [table, body.tables[table].length])), message: '完整服务数据已恢复。请使用备份中的账号重新登录。' }); }
   if (path === '/api/v1/items') { const user = tokenUser(req, req.method === 'POST' ? ['items:write'] : ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method === 'GET') return ok(res, listItems(user.id, url.searchParams)); if (req.method === 'POST') { const result = await createItem(user.id, await readBody(req)); return ok(res, result, result.duplicate ? 200 : 201); } }
+  if (path === '/api/v1/me' && req.method === 'GET') { const user = tokenUser(req, []); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效或已撤销。'); return ok(res, { username: user.username }); }
+  if (path === '/api/v1/tags' && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); return ok(res, { tags: db.prepare('SELECT id,name FROM tags WHERE user_id=? ORDER BY name COLLATE NOCASE ASC').all(user.id) }); }
+  const v1HighlightMatch = path.match(/^\/api\/v1\/items\/([^/]+)\/highlights$/);
+  if (v1HighlightMatch && req.method === 'POST') { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1HighlightMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); const body = await readBody(req); const text = String(body.text || '').trim().slice(0, 4000); if (!text) return fail(res, 400, 'INVALID_HIGHLIGHT', '高亮内容不能为空。'); const highlightId = id('hlt'); const timestamp = now(); db.exec('BEGIN'); try { db.prepare('INSERT INTO highlights (id,item_id,text,note_title,note,color,start_offset,end_offset,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(highlightId, item.id, text, '', '', 'yellow', null, null, timestamp, timestamp); timelineEvent(user.id, item.id, 'highlight_created', highlightId, timestamp); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } audit(user.id, 'highlight.create', highlightId); return ok(res, db.prepare('SELECT * FROM highlights WHERE id=?').get(highlightId), 201); }
   const v1Match = path.match(/^\/api\/v1\/items\/([^/]+)$/);
   if (v1Match && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1Match[1]); return item ? ok(res, itemData(item)) : fail(res, 404, 'NOT_FOUND', '未找到该条目。'); }
   return fail(res, 404, 'NOT_FOUND', '接口不存在。');
@@ -809,8 +934,12 @@ function serveArchive(req, res, url) {
   if (!item || (filename !== archive.documentFile && filename !== archive.pdfFile && !/^image-\d{3}\.(?:jpe?g|png|gif|webp|avif|svg|img)$/i.test(filename))) { res.writeHead(404); return res.end('Not found'); }
   const file = resolve(archive.directory, filename);
   if (!file.startsWith(resolve(archive.directory)) || !existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
+  const extension = extname(file).toLowerCase();
   const types = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml', '.html': 'text/html; charset=utf-8', '.pdf': 'application/pdf' };
-  res.writeHead(200, { 'Content-Type': types[extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'private, max-age=31536000, immutable' }); createReadStream(file).pipe(res);
+  // PDFs may be regenerated after an archive repair. Do not serve a year-long
+  // immutable response for a file whose contents can legitimately be replaced.
+  const cacheControl = extension === '.pdf' ? 'private, no-cache, max-age=0, must-revalidate' : 'private, max-age=31536000, immutable';
+  res.writeHead(200, { 'Content-Type': types[extension] || 'application/octet-stream', 'Cache-Control': cacheControl }); createReadStream(file).pipe(res);
 }
 function serveStatic(req, res, url) {
   if (url.pathname === '/print') return printable(req, res, url);
@@ -821,13 +950,13 @@ function serveStatic(req, res, url) {
   const file = normalize(join(staticRoot, relativePath));
   const fileRelative = relative(staticRoot, file);
   if (fileRelative.startsWith('..') || isAbsolute(fileRelative) || !existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
-  const types = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
+  const types = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
   res.writeHead(200, { 'Content-Type': types[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' }); createReadStream(file).pipe(res);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  migrate(); await seed(); migrateArchivePaths(); await createMissingArchivePdfs({ force: process.env.PAPERLEAF_REBUILD_PDFS === '1' });
+  migrate(); await seed(); migrateArchivePaths(); if (process.env.PAPERLEAF_REBUILD_PDFS === '1') await createMissingArchivePdfs({ force: true }); startLibraryMonitor();
   createServer(async (req, res) => { try { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (url.pathname.startsWith('/api/')) await api(req, res, url); else serveStatic(req, res, url); } catch (error) { console.error(error); fail(res, 500, 'INTERNAL_ERROR', '请求未完成，请稍后重试。'); } }).listen(port, host, () => console.log(`PaperLeaf listening on http://${host}:${port}`));
 }
 
-export { archiveSegment, archiveSnapshot, clearItemArchive, createArchivePdf, fetchPage, itemData, sanitizeDocument };
+export { archiveSegment, archiveSnapshot, clearItemArchive, clientSnapshotPage, createArchivePdf, fetchPage, itemData, sanitizeDocument };

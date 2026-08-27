@@ -779,6 +779,13 @@ body[data-reader-font-family] .reader-article blockquote { font-family: var(--re
 .reader-article pre code { background: transparent; color: inherit; padding: 0; }
 .reader-article table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 16px; }
 .reader-article th,.reader-article td { border: 1px solid var(--line); padding: 10px 13px; text-align: left; }
+.reader-code-block { position: relative; margin: 22px 0; min-width: 0; }
+.reader-code-block .reader-code-copy { position: absolute; z-index: 1; top: 9px; right: 9px; display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 4px 9px; border: 1px solid #cdbb95; border-radius: 5px; background: #fbf6ea; color: #755638; cursor: pointer; font: 600 13px/1.2 "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+.reader-code-block .reader-code-copy:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.reader-code-block .reader-code-copy:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.reader-code-block .reader-code-copy:disabled { cursor: default; opacity: .82; }
+.reader-code-block .reader-code-copy .ti { font-size: 15px; }
+.reader-article .reader-code-block pre { margin: 0; padding-top: 52px; }
 .reader-highlight { border-radius: 3px; background: #f5cf69; box-decoration-break: clone; color: inherit; cursor: pointer; padding: 0 .08em; -webkit-box-decoration-break: clone; }
 .reader-highlight.is-target { animation: highlight-target 1.4s ease; }
 @keyframes highlight-target { 0%,100% { background: #f5cf69; } 45% { background: #ffe9a9; box-shadow: 0 0 0 4px rgba(245, 207, 105, .42); } }
@@ -1261,22 +1268,12 @@ body[data-reader-mode="minimal"] .reader-main { width: min(100%, 1000px); }
   min-height: 36px;
 }
 
-.settings-panel input,
-#user-form select {
+.settings-panel input {
   border-radius: 5px;
   font-size: 14px;
 }
 
-#user-form select {
-  width: 100%;
-  appearance: auto;
-  border: 1px solid #cdbb95;
-  background: #fffaf0;
-  color: var(--ink);
-  padding: 6px 10px;
-}
-
-#user-form label:has(> select)::after { display: none; }
+#user-role-control { width: 100%; }
 
 .settings-command {
   display: flex;
@@ -1356,9 +1353,8 @@ body[data-reader-mode="minimal"] .reader-main { width: min(100%, 1000px); }
 
 .extension-guide {
   max-width: 720px;
-  border-bottom: 1.5px dashed var(--line);
-  margin: 0 0 22px;
-  padding: 0 0 20px;
+  margin: 0;
+  padding: 0;
 }
 
 .extension-guide p,
@@ -2629,10 +2625,6 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .tag-list.interactive { gap: 6px; }
 .tag-list.interactive > button { min-height: 36px; padding: 7px 10px; line-height: 20px; }
 
-/* Keep the paper seal and its wordmark on the same visual scale. */
-.topbar .brand { gap: 8px; font-size: 26px; line-height: 26px; }
-.topbar .brand > span { width: 26px; height: 26px; font-size: 16px; }
-
 /* Tag management is a card index; selecting a card reveals its linked articles below. */
 .manage-tags-mode .manage-workbench { display: block; min-height: 0; border-bottom: 0; }
 .manage-tags-mode .manage-entities { border-right: 0; padding: 0; }
@@ -2689,9 +2681,7 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .timeline-card-event:last-child { border-bottom: 1px dashed var(--line); }
 .timeline-card footer { display: flex; flex: 0 0 34px; align-items: center; justify-content: flex-end; min-height: 34px; border-top: 1.5px dashed var(--line); }
 
-/* v0.0.2: compact homepage navigation, notes tools, and journal alignment. */
-.topbar .brand { gap: 6px; font-size: 20px; line-height: 20px; }
-.topbar .brand > span { width: 20px; height: 20px; font-size: 13px; }
+/* v0.0.3: compact homepage navigation, notes tools, and journal alignment. */
 .sidebar-section-title { align-items: center; }
 .sidebar-new-folder {
   display: grid;
@@ -2724,6 +2714,21 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 /* The settings surface is a standalone page, not an extension of the article layout. */
 .settings-page { position: fixed; z-index: 80; inset: 0; overflow-y: auto; min-height: 100vh; }
 
+/* v0.0.3: align the settings surface with the reader header. */
+.settings-bar { min-height: 62px; gap: 14px; padding: 10px clamp(18px, 3vw, 34px); }
+.settings-bar .eyebrow { display: none; }
+.settings-bar h1 { color: #5a4f3c; font-size: 19px; font-weight: 600; line-height: 1; }
+.settings-shell { min-height: calc(100vh - 62px); }
+.settings-nav { top: 62px; min-height: calc(100vh - 62px); }
+.settings-nav button { font-size: 17px; font-weight: 700; }
+
+/* Password fields use an in-control eye toggle across login and settings forms. */
+.password-input { position: relative; display: block; width: 100%; }
+.password-input > input { padding-right: 46px; }
+.password-visibility-toggle { position: absolute; top: 1px; right: 1px; width: 42px; height: calc(100% - 2px); min-height: 0; border: 0; border-radius: 0 5px 5px 0; background: transparent; color: #3a3226; padding: 0; }
+.password-visibility-toggle:hover { background: rgba(168, 82, 31, .08); color: var(--primary); }
+.password-visibility-toggle .ti { font-size: 18px; }
+
 /* Tags are summary cards only. */
 .manage-tags-mode .manage-toolbar { display: none; }
 .manage-tags-mode .manage-workbench { margin-top: 24px; }
@@ -2740,6 +2745,131 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .timeline-journal .timeline-event-body h3 { display: flex; min-height: 26px; align-items: center; gap: 10px; line-height: 1.45; }
 .timeline-journal-event-name { display: inline-block; margin-right: 0; font-size: 16px; line-height: 1.45; }
 .timeline-journal-article { margin-top: 5px; color: #5a4f3c; font-size: 16px; line-height: 1.65; }
+
+/* v0.0.3: one paper seal is used for the wordmark and browser icon. */
+.topbar .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 28px;
+  line-height: 28px;
+}
+
+.topbar .brand > span {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  font-size: 17px;
+}
+
+/* Settings tabs use the same eyebrow-and-title hierarchy as the notes page. */
+.settings-panel > header {
+  max-width: 650px;
+  margin-bottom: 26px;
+}
+
+.settings-panel > header .eyebrow {
+  margin: 0;
+  color: var(--muted);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.settings-panel h2 {
+  margin: 4px 0 8px;
+  color: var(--ink);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.settings-panel .account-line {
+  margin: 0;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .settings-panel h2 { font-size: 28px; }
+}
+
+/* Navigation glyphs deliberately inherit the tab label's text size. */
+.settings-nav .ti { font-size: inherit; }
+
+/* Keep the 17px tab glyphs on the same baseline and scale as their labels. */
+.settings-nav .ti {
+  display: inline-block;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  font-size: 17px;
+  line-height: 17px;
+}
+
+/* The extension instructions begin after the Token controls and records. */
+#token-list + .extension-guide {
+  margin-top: 30px;
+  padding-top: 22px;
+}
+
+.data-transfer {
+  display: grid;
+  max-width: 720px;
+  gap: 24px;
+}
+
+.data-transfer-block {
+  display: grid;
+  gap: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.data-transfer .data-transfer-block.form-stack {
+  width: 100%;
+  max-width: 720px;
+}
+
+.data-transfer-block > div { display: grid; gap: 4px; }
+.data-transfer-block h3 { margin: 0; }
+.data-transfer-block p,
+.file-input-name,
+.data-admin-copy { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.file-picker { display: flex; min-height: 36px; align-items: center; gap: 10px; }
+.file-picker .secondary { flex: 0 0 auto; }
+.file-input-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.data-import-confirm { display: flex; width: fit-content; align-items: center; justify-self: start; gap: 8px; color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.5; }
+.data-import-confirm input { flex: 0 0 17px; width: 17px; height: 17px; min-height: 17px; appearance: none; border: 1px solid var(--control-border); border-radius: 3px; background: var(--control-surface); margin: 0; padding: 0; }
+.data-import-confirm input:hover { border-color: #b99f70; background: #fffaf0; }
+.data-import-confirm input:checked { border-color: var(--primary); background: var(--primary); }
+.data-import-confirm input:checked::after { display: block; color: #fffaf0; content: "✓"; font-size: 13px; font-weight: 700; line-height: 15px; text-align: center; }
+.data-transfer-block .primary { justify-self: start; }
+.data-transfer-block #data-transfer-message:empty { display: none; }
+.data-admin-copy { max-width: 720px; margin: 6px 0 0; color: var(--primary); }
+
+.user-list { display: grid; gap: 0; }
+.settings-panel .quiet-list.user-list { max-width: 720px; }
+.user-record {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 88px;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1.5px dashed var(--line);
+  padding: 14px 0;
+}
+.user-record-main { display: grid; min-width: 0; gap: 5px; }
+.user-record strong { color: var(--ink); font-size: 15px; font-weight: 700; }
+.user-record-main > span { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.user-record .secondary { min-height: 36px; padding: 7px 12px; font-size: 14px; font-weight: 600; }
+.user-record-spacer { min-width: 72px; }
 
 @media (max-width: 760px) {
   .notes-new-folder { align-self: stretch; }
@@ -2877,3 +3007,13 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
   .manage-workbench { grid-template-columns: 1fr; row-gap: 26px; }
   .manage-tags { border-left: 0; border-top: 1.5px dashed var(--line); padding: 24px 0; }
 }
+
+@media (max-width: 680px) {
+  .top-actions #api-docs-button { display: inline-flex; }
+}
+
+/* Reader navigation keeps a readable gutter before its right divider and uses one aligned line per heading. */
+.reader-toc { padding-right: 30px; }
+.reader-toc button,
+.reader-toc button.sub { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.highlight-popover { max-height: calc(100vh - 28px); overflow-y: auto; overscroll-behavior: contain; }

@@ -1,3 +1,5 @@
+name: aiproject
+
 services:
   # Compose 内部服务标识。
   paperleaf:
@@ -7,16 +9,16 @@ services:
       # Dockerfile 相对于构建上下文的位置。
       dockerfile: docker/Dockerfile
     # 容器命名规则：PaperLeaf_v<版本号>。
-    container_name: PaperLeaf_v0.0.3
+    container_name: PaperLeaf
     labels:
       com.paperleaf.version: "0.0.3"
       com.paperleaf.api-docs: "/api-docs.html"
       com.paperleaf.api-docs-navigation: "expandable"
-    # Docker 或宿主机重启后自动恢复；手动停止时保持停止。
+    # Docker 或 NAS 重启后自动恢复；手动停止时保持停止。
     restart: unless-stopped
     ports:
-      # 宿主机端口可通过 docker/.env 中的 PAPERLEAF_PORT 修改；容器应用端口固定为 3080。
-      - "${PAPERLEAF_PORT:-3080}:3080"
+      # NAS 宿主机对外端口 47777，容器内应用端口固定为 3080。
+      - "47777:3080"
     environment:
       # 容器内监听地址，需保留为 0.0.0.0 以接收 Docker 转发流量。
       HOST: 0.0.0.0
@@ -24,12 +26,10 @@ services:
       PORT: 3080
       # SQLite、用户设置和 Token 加密密钥的容器内目录；由下方 data 挂载持久化。
       PAPERLEAF_DATA_DIR: /app/data
-      # 首次初始化管理员用户名；默认 admin，可在 docker/.env 修改。
-      PAPERLEAF_ADMIN_USER: ${PAPERLEAF_ADMIN_USER:-admin}
-      # 首次初始化管理员密码；默认 admin123，可在 docker/.env 修改。
-      PAPERLEAF_ADMIN_PASSWORD: ${PAPERLEAF_ADMIN_PASSWORD:-admin123}
       # 文章 HTML、PDF 与本地图片的容器内目录；由下方 Library 挂载持久化。
       PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
+      # 容器内 Chromium 路径，用于将文章快照生成 PDF。
+      PAPERLEAF_PDF_BROWSER: /usr/bin/chromium
     volumes:
       # 宿主机 data：数据库和应用配置，对应 PAPERLEAF_DATA_DIR。
       - ../../data:/app/data

@@ -1,0 +1,16 @@
+node_modules/
+data/
+data-backups/
+Library/
+library/
+backup/
+tests/
+extension/
+scripts/
+assets/
+docs/
+.env
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+npm-debug.log*
