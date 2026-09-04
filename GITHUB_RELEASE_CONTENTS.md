@@ -1,10 +1,10 @@
-# PaperLeaf v0.0.3 GitHub Docker 发布内容
+# PaperLeaf v1.0.0 GitHub Docker 发布内容
 
-v0.0.3 完成后，在版本目录下新建独立的 Docker 发布目录作为 GitHub 仓库根目录。该目录只复制容器运行所需文件，不将本地开发目录直接初始化为 Git 仓库。
+v1.0.0 发布时，在独立的 Docker 发布目录中组装 GitHub 仓库根目录。该目录只复制容器运行所需文件，不将本地开发目录直接初始化为 Git 仓库。
 
 ## 发布目录包含
 
-- `server.mjs`、`public/`、`package.json`（Docker 镜像安装运行依赖所必需）
+- `server.mjs`、`public/`、`package.json`、`package-lock.json`（Docker 镜像安装运行依赖所必需）
 - `docker/Dockerfile`、`docker/docker-compose.yml`、`docker/.env.example`
 - `extension/`（可在 Edge 的“加载解压缩的扩展”中直接加载的浏览器扩展源码）
 - `README.md`、`.gitignore`、`docker/Dockerfile.dockerignore`

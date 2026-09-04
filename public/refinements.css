@@ -2681,7 +2681,7 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .timeline-card-event:last-child { border-bottom: 1px dashed var(--line); }
 .timeline-card footer { display: flex; flex: 0 0 34px; align-items: center; justify-content: flex-end; min-height: 34px; border-top: 1.5px dashed var(--line); }
 
-/* v0.0.3: compact homepage navigation, notes tools, and journal alignment. */
+/* v0.0.4: compact homepage navigation, notes tools, and journal alignment. */
 .sidebar-section-title { align-items: center; }
 .sidebar-new-folder {
   display: grid;
@@ -2714,7 +2714,7 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 /* The settings surface is a standalone page, not an extension of the article layout. */
 .settings-page { position: fixed; z-index: 80; inset: 0; overflow-y: auto; min-height: 100vh; }
 
-/* v0.0.3: align the settings surface with the reader header. */
+/* v0.0.4: align the settings surface with the reader header. */
 .settings-bar { min-height: 62px; gap: 14px; padding: 10px clamp(18px, 3vw, 34px); }
 .settings-bar .eyebrow { display: none; }
 .settings-bar h1 { color: #5a4f3c; font-size: 19px; font-weight: 600; line-height: 1; }
@@ -2746,7 +2746,7 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .timeline-journal-event-name { display: inline-block; margin-right: 0; font-size: 16px; line-height: 1.45; }
 .timeline-journal-article { margin-top: 5px; color: #5a4f3c; font-size: 16px; line-height: 1.65; }
 
-/* v0.0.3: one paper seal is used for the wordmark and browser icon. */
+/* v0.0.4: one paper seal is used for the wordmark and browser icon. */
 .topbar .brand {
   display: inline-flex;
   align-items: center;
@@ -2878,6 +2878,42 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .timeline-card-event-meta { display: flex; min-height: 18px; align-items: center; gap: 12px; }
 .timeline-card-event-meta time { color: var(--muted); font: 12px/18px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .timeline-card-event-meta b { color: var(--primary); font: 600 12px/18px "Songti SC", SimSun, Georgia, serif; }
+
+/* v0.0.4: WeRead-backed official-account subscriptions stay in their own top workspace. */
+.mp-page { max-width: 1480px; }
+.mp-heading { align-items: flex-start; }
+.mp-heading-actions, .mp-auth-actions, .mp-settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.mp-auth-card, .mp-settings-panel, .mp-subscriptions-section { margin-top: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 3px 12px rgba(120, 100, 60, .08); }
+.mp-auth-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 20px; }
+.mp-auth-state { display: flex; align-items: flex-start; gap: 11px; }
+.mp-status-dot { width: 10px; height: 10px; flex: 0 0 auto; margin-top: 6px; border-radius: 50%; background: #ba7a4c; box-shadow: 0 0 0 4px rgba(186, 122, 76, .12); }
+.mp-status-dot.is-active { background: #4f805a; box-shadow: 0 0 0 4px rgba(79, 128, 90, .12); }
+.mp-auth-state strong { display: block; color: var(--ink); font-size: 16px; }
+.mp-auth-state p, .mp-settings-panel p { margin: 5px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+.mp-settings-panel { padding: 20px; }
+.mp-settings-panel > header, .mp-subscriptions-section > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.mp-settings-panel h2, .mp-subscriptions-section h2 { margin: 3px 0 0; color: var(--ink); font-size: 20px; }
+.mp-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.mp-settings-grid section { padding: 16px; border: 1px dashed var(--line); border-radius: 8px; background: #fffaf0; }
+.mp-settings-grid h3, .mp-runs h3 { margin: 0; color: var(--ink); font-size: 15px; }
+.mp-refresh-label { display: grid; gap: 7px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+.mp-refresh-label select { height: 36px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); padding: 0 10px; font: inherit; }
+.mp-settings-actions { margin-top: 14px; }
+.danger-text-button { border: 0; background: transparent; color: #a14b3f; padding: 7px 4px; font: inherit; cursor: pointer; }
+.mp-runs { margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--line); }
+.mp-run { display: grid; grid-template-columns: 54px 160px minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 10px 0; border-bottom: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
+.mp-run span { color: var(--primary); font-weight: 700; }.mp-run p { margin: 0; }
+.mp-subscriptions-section { padding: 20px; }
+.mp-subscription-list { display: grid; gap: 10px; margin-top: 16px; }
+.mp-subscription { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 13px; align-items: center; padding: 13px; border: 1px solid var(--line); border-radius: 8px; background: #fffdf8; }
+.mp-subscription.is-paused { opacity: .62; }
+.mp-cover { width: 46px; height: 46px; overflow: hidden; display: grid; place-items: center; border-radius: 8px; background: #f4ead7; color: var(--primary); font-size: 23px; }.mp-cover img { width: 100%; height: 100%; object-fit: cover; }
+.mp-subscription-title { display: flex; align-items: baseline; gap: 9px; }.mp-subscription-title h3 { margin: 0; color: var(--ink); font-size: 16px; }.mp-subscription-title span { color: var(--primary); font-size: 12px; }
+.mp-subscription-main p { overflow: hidden; margin: 4px 0; color: #5a4f3c; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.mp-subscription-main small { color: var(--muted); font-size: 12px; }.mp-subscription-actions { display: flex; gap: 5px; }
+.mp-auth-dialog { width: min(360px, calc(100vw - 40px)); }.mp-auth-dialog header, .mp-add-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.mp-auth-dialog h2, .mp-add-dialog h2 { margin: 4px 0 0; color: var(--ink); font-size: 20px; }
+.mp-qr-stage { display: grid; min-height: 300px; place-items: center; gap: 13px; margin: 18px 0 8px; text-align: center; color: var(--muted); }.mp-qr-stage img { width: min(280px, 100%); height: auto; }.mp-qr-stage > i { font-size: 34px; color: var(--primary); }
+.mp-bookshelf { max-height: 240px; overflow: auto; border: 1px dashed var(--line); border-radius: 7px; }.mp-bookshelf-row { display: grid; width: 100%; gap: 3px; border: 0; border-bottom: 1px dashed var(--line); background: transparent; padding: 10px 12px; color: var(--ink); text-align: left; cursor: pointer; }.mp-bookshelf-row:hover { background: #fff7e8; }.mp-bookshelf-row small { color: var(--muted); }
+@media (max-width: 760px) { .mp-heading, .mp-auth-card { align-items: stretch; flex-direction: column; }.mp-heading-actions { width: 100%; }.mp-heading-actions button { flex: 1; }.mp-settings-grid { grid-template-columns: 1fr; }.mp-run { grid-template-columns: 52px 1fr; }.mp-run p { grid-column: 1 / -1; }.mp-subscription { grid-template-columns: 42px minmax(0, 1fr); }.mp-subscription-actions { grid-column: 2; }.mp-cover { width: 42px; height: 42px; } }
 
 /* One workbench, with explicit collection and tag management areas. */
 .manage-workbench { grid-template-columns: minmax(238px, 270px) minmax(340px, 1fr) minmax(440px, .95fr); column-gap: 28px; }
@@ -3017,3 +3053,233 @@ dialog .select-trigger { font-size: 14px; font-weight: 400; }
 .reader-toc button,
 .reader-toc button.sub { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .highlight-popover { max-height: calc(100vh - 28px); overflow-y: auto; overscroll-behavior: contain; }
+
+/* v0.0.4 official-account workspace: reuse the paper cards, dashed rules, and compact controls. */
+.mp-page { max-width: none; }
+.mp-heading { align-items: flex-start; padding-bottom: 20px; border-bottom: 1.5px dashed var(--line); }
+.mp-heading-actions { align-items: center; gap: 8px; }
+.mp-heading-actions .primary,
+.mp-heading-actions .secondary { min-height: 36px; padding: 7px 12px; font-size: 14px; }
+.mp-auth-card,
+.mp-settings-panel,
+.mp-subscriptions-section { margin-top: 20px; border: 1.5px solid #cdbb95; border-radius: 5px; background: var(--surface); box-shadow: 0 3px 8px rgba(120, 100, 60, .10); }
+.mp-content-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); align-items: start; gap: 16px; margin-top: 20px; }
+.mp-content-grid .mp-subscriptions-section { margin-top: 0; }
+.mp-auth-card { min-height: 88px; padding: 15px 18px; }
+.mp-auth-state { gap: 10px; }
+.mp-status-dot { width: 9px; height: 9px; margin-top: 7px; box-shadow: 0 0 0 3px rgba(186, 122, 76, .12); }
+.mp-status-dot.is-active { box-shadow: 0 0 0 3px rgba(79, 128, 90, .12); }
+.mp-auth-state strong { font-size: 15px; }
+.mp-auth-state p,
+.mp-settings-panel p { font-size: 13px; line-height: 1.6; }
+.mp-auth-actions .secondary,
+.mp-auth-actions .text-button { min-height: 34px; font-size: 13px; }
+.mp-settings-panel { padding: 18px; }
+.mp-settings-panel > header,
+.mp-subscriptions-section > header { min-height: 44px; align-items: center; padding-bottom: 13px; border-bottom: 1.5px dashed var(--line); }
+.mp-settings-panel h2,
+.mp-subscriptions-section h2 { margin: 2px 0 0; font-size: 18px; }
+.mp-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.mp-settings-grid section { min-height: 156px; border: 1px dashed var(--line); border-radius: 5px; background: #fffaf0; padding: 14px; }
+.mp-settings-grid h3,
+.mp-runs h3 { font-size: 14px; }
+.mp-refresh-label { gap: 6px; margin-top: 11px; font-size: 13px; }
+.mp-refresh-label select { min-height: 36px; height: 36px; border-radius: 5px; font-size: 14px; }
+.mp-settings-actions { margin-top: 12px; gap: 6px; }
+.mp-settings-actions .secondary { min-height: 34px; padding: 7px 10px; font-size: 13px; }
+.danger-text-button { min-height: 34px; padding: 6px 3px; font-size: 13px; }
+.mp-runs { margin-top: 17px; padding-top: 14px; }
+.mp-run { grid-template-columns: 50px 150px minmax(0, 1fr); gap: 10px; padding: 9px 0; font-size: 12px; }
+.mp-subscriptions-section { padding: 18px; }
+.mp-section-actions { display: flex; align-items: center; gap: 9px; }
+.mp-section-actions .secondary { min-height: 34px; padding: 7px 10px; font-size: 13px; }
+.mp-section-actions .primary { min-height: 34px; padding: 7px 10px; font-size: 13px; }
+.wx-card.is-authorized .wx-dot { background: #4f805a; box-shadow: 0 0 0 3px rgba(79, 128, 90, .18); }
+.mp-subscription-list { gap: 0; margin-top: 10px; }
+.mp-subscription { min-height: 72px; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; border: 0; border-bottom: 1px dashed var(--line); border-radius: 0; background: transparent; padding: 12px 2px; }
+.mp-subscription:last-child { border-bottom: 0; }
+.mp-cover { width: 42px; height: 42px; border-radius: 5px; font-size: 20px; }
+.mp-subscription-title { gap: 8px; }
+.mp-subscription-title h3 { font-size: 15px; }
+.mp-subscription-main p { margin: 3px 0; font-size: 13px; }
+.mp-subscription-main small { font-size: 12px; }
+.mp-subscription-actions { gap: 3px; }
+.mp-subscription-actions .icon-button { width: 34px; min-width: 34px; height: 34px; min-height: 34px; }
+.mp-article-list { display: grid; margin-top: 10px; }
+.mp-article { display: grid; width: 100%; min-height: 76px; grid-template-columns: 42px minmax(0, 1fr) auto 16px; align-items: center; gap: 12px; border: 0; border-bottom: 1px dashed var(--line); background: transparent; color: var(--ink); padding: 12px 2px; text-align: left; text-decoration: none; }
+.mp-article:last-child { border-bottom: 0; }
+.mp-article:hover { background: #fff7e8; color: var(--primary); }
+.mp-article-cover { display: grid; width: 42px; height: 42px; place-items: center; overflow: hidden; border-radius: 5px; background: var(--soft-strong); color: var(--primary); font-size: 20px; }
+.mp-article-cover img { width: 100%; height: 100%; object-fit: cover; }
+.mp-article-main { display: grid; min-width: 0; gap: 3px; }
+.mp-article-main small { color: var(--primary); font-size: 12px; }
+.mp-article-main strong,
+.mp-article-main em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-article-main strong { font-size: 15px; }
+.mp-article-main em { color: var(--muted); font-size: 12px; font-style: normal; }
+.mp-article time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.mp-article > .ti { color: var(--primary); }
+.mp-article-empty { margin: 0; border: 0; background: transparent; }
+#mp-auth-dialog { width: min(94vw, 400px); }
+#mp-auth-dialog .mp-auth-dialog { padding: 25px; }
+#mp-settings-dialog { width: min(94vw, 760px); border: 0; background: transparent; padding: 0; }
+#mp-settings-dialog::backdrop { background: rgba(55, 43, 28, .34); }
+#mp-settings-dialog .mp-settings-panel { margin: 0; }
+.mp-auth-dialog header,
+.mp-add-dialog header { margin-bottom: 16px; }
+.mp-auth-dialog h2,
+.mp-add-dialog h2 { font-size: 20px; }
+.mp-qr-stage { min-height: 278px; margin: 8px 0; gap: 11px; font-size: 13px; }
+.mp-qr-stage img { width: min(256px, 100%); border: 1px solid var(--line); background: #fff; padding: 7px; }
+.mp-qr-stage > i { font-size: 32px; }
+#mp-add-dialog { width: min(94vw, 620px); }
+#mp-add-dialog .form-stack { gap: 12px; }
+.mp-add-intro { border: 1px dashed var(--line); border-radius: 5px; background: #fffaf0; padding: 13px; }
+.mp-add-intro h3 { margin: 0; color: var(--ink); font-size: 15px; }
+.mp-add-intro ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.mp-bookshelf { max-height: 284px; border-radius: 5px; }
+.mp-bookshelf-row { display: grid; grid-template-columns: 18px 38px minmax(0, 1fr) 18px; align-items: center; gap: 10px; min-height: 60px; padding: 10px 11px; font-size: 14px; cursor: pointer; }
+.mp-bookshelf-row:hover { background: #fff7e8; }
+.mp-bookshelf-row:last-child { border-bottom: 0; }
+.mp-bookshelf-row input { width: 17px; height: 17px; accent-color: var(--primary); }
+.mp-bookshelf-row:has(input:checked) { background: #fff3dd; }
+.mp-bookshelf-row > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-bookshelf-row > .ti-check { visibility: hidden; color: var(--primary); }
+.mp-bookshelf-row:has(input:checked) > .ti-check { visibility: visible; }
+.mp-bookshelf-cover { display: grid; width: 38px; height: 38px; place-items: center; overflow: hidden; border-radius: 5px; background: var(--soft-strong); color: var(--primary); font-size: 18px; }
+.mp-bookshelf-cover img { width: 100%; height: 100%; object-fit: cover; }
+
+@media (max-width: 1100px) {
+  .mp-content-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .mp-heading { padding-bottom: 16px; }
+  .mp-heading-actions { width: 100%; }
+  .mp-heading-actions .primary,
+  .mp-heading-actions .secondary { flex: 1 1 140px; }
+  .mp-auth-card { align-items: stretch; flex-direction: column; }
+  .mp-auth-actions { justify-content: flex-start; }
+  .mp-settings-grid { grid-template-columns: 1fr; }
+  .mp-settings-grid section { min-height: 0; }
+  .mp-run { grid-template-columns: 46px 1fr; }
+  .mp-run p { grid-column: 1 / -1; }
+  .mp-subscription { grid-template-columns: 40px minmax(0, 1fr); }
+  .mp-subscription-actions { grid-column: 2; }
+  .mp-cover { width: 40px; height: 40px; }
+  .mp-article { grid-template-columns: 40px minmax(0, 1fr) 16px; gap: 10px; }
+  .mp-article-cover { width: 40px; height: 40px; }
+  .mp-article time { display: none; }
+  #mp-add-dialog .form-stack,
+  #mp-auth-dialog .mp-auth-dialog { padding: 21px; }
+}
+
+@media (max-width: 480px) {
+  .mp-heading-actions .primary,
+  .mp-heading-actions .secondary { flex-basis: 100%; }
+  .mp-section-actions { gap: 6px; }
+  .mp-section-actions .secondary { padding: 7px 8px; }
+}
+
+/* Public-account workspace follows the notes-management page rhythm and controls. */
+#application.notes-active .quick-save { display: flex; }
+.mp-page { max-width: none; min-height: calc(100vh - 73px); margin: 0; padding: 42px clamp(20px, 5vw, 76px) 64px; box-shadow: none; }
+.mp-heading,
+.mp-auth-card,
+.mp-content-grid { max-width: 1420px; margin-right: auto; margin-left: auto; }
+.mp-heading { align-items: end; margin-bottom: 24px; padding-bottom: 0; border-bottom: 0; }
+.mp-heading.content-heading h1 { margin: 4px 0 0; font-size: 28px; font-weight: 700; line-height: 1.35; }
+.mp-auth-card { margin-top: 0; }
+.mp-content-grid { margin-top: 20px; }
+
+.mp-refresh-label .mp-refresh-control { width: 100%; margin-top: 2px; }
+.mp-refresh-control .select-trigger { width: 100%; min-height: 36px; height: 36px; border: 1px solid var(--control-border); border-radius: 5px; background: var(--control-surface); padding: 6px 10px; }
+.mp-refresh-control .select-menu { width: 100%; min-width: 100%; }
+
+#mp-settings-dialog .mp-settings-panel > header,
+#mp-auth-dialog .mp-auth-dialog > header,
+#mp-add-dialog .mp-add-dialog > header { position: relative; display: block; padding-right: 42px; }
+#mp-settings-dialog .mp-settings-panel > header > .icon-button,
+#mp-auth-dialog .mp-auth-dialog > header > .icon-button,
+#mp-add-dialog .mp-add-dialog > header > .icon-button { position: absolute; top: 0; right: 0; display: inline-grid; width: 32px; height: 32px; min-height: 32px; place-items: center; border-radius: 50%; padding: 0; }
+.mp-qr-stage { display: grid; min-height: 278px; place-items: center; align-content: center; justify-items: center; text-align: center; }
+.mp-qr-stage p { max-width: 280px; margin: 0; }
+.mp-qr-stage img { display: block; margin: 0 auto; }
+
+.mp-subscription-actions .icon-button { box-sizing: border-box; display: inline-grid; width: 34px; min-width: 34px; height: 34px; min-height: 34px; flex: 0 0 34px; aspect-ratio: 1; place-items: center; border-radius: 50%; padding: 0; line-height: 1; }
+.mp-subscription-actions .icon-button > .ti { line-height: 1; }
+.mp-article:hover,
+.mp-article:focus-visible { background: #f3ead6; color: var(--primary); outline: none; }
+
+/* Keep the authorization dialog centered as a complete card rather than positioning its close control inside the title text. */
+#mp-auth-dialog { width: min(94vw, 420px); padding: 0; }
+#mp-auth-dialog .mp-auth-dialog { width: 100%; padding: 26px; }
+#mp-auth-dialog .mp-auth-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 0 0 18px; padding: 0 0 18px; }
+#mp-auth-dialog .mp-auth-dialog > header > .icon-button { position: static; flex: 0 0 32px; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; }
+#mp-auth-dialog .mp-qr-stage { display: flex; width: 100%; min-height: 0; margin: 0; align-items: center; justify-content: center; gap: 12px; text-align: center; }
+#mp-auth-dialog .mp-qr-stage > * { align-self: center; }
+#mp-auth-dialog .mp-qr-stage p { max-width: 300px; text-align: center; }
+
+/* Desktop-side subscription and article rows share a rhythm, so each row aligns across both columns. */
+@media (min-width: 1101px) {
+  .mp-subscription,
+  .mp-article { box-sizing: border-box; min-height: 104px; height: 104px; padding-top: 8px; padding-bottom: 8px; }
+}
+
+/* Subscription actions are compact glyph controls, without the inherited circular button frame. */
+.mp-subscription-actions { gap: 5px; }
+.mp-subscription-actions .icon-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; min-height: 30px; flex: 0 0 30px; border: 0; border-radius: 4px; background: transparent; padding: 0; }
+.mp-subscription-actions .icon-button:hover:not(:disabled) { border-color: transparent; background: var(--soft); }
+
+.mp-bookshelf-row { grid-template-columns: 18px 38px minmax(0, 1fr); }
+.mp-bookshelf-row:hover { background: #f3ead6; }
+.mp-check-control { position: relative; display: grid; width: 18px; height: 18px; place-items: center; }
+.mp-check-control input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.mp-check-control > span { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid #cdbb95; border-radius: 4px; background: var(--control-surface); color: transparent; transition: background .15s ease, border-color .15s ease, color .15s ease; }
+.mp-check-control > span > .ti { font-size: 14px; line-height: 1; }
+.mp-check-control:has(input:checked) > span { border-color: var(--primary); background: var(--primary); color: #fff; }
+.mp-check-control:focus-within > span { outline: 3px solid rgba(168, 82, 31, .18); outline-offset: 2px; }
+
+/* The subscription selector distinguishes existing sources without treating them as new additions. */
+.mp-bookshelf-row.is-subscribed { background: #f7f0e2; color: var(--muted); cursor: default; }
+.mp-bookshelf-row.is-subscribed:hover { background: #f7f0e2; }
+.mp-check-control input:disabled { cursor: default; }
+.mp-check-control:has(input:disabled) > span { border-color: #a89b85; background: #a89b85; color: #fff; }
+.mp-bookshelf-meta { display: grid; min-width: 0; gap: 2px; }
+.mp-bookshelf-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-bookshelf-meta small { color: var(--primary); font-size: 12px; }
+
+/* Desktop space follows the requested 4:6 subscription-to-article proportion. */
+.mp-content-grid { grid-template-columns: minmax(0, 4fr) minmax(0, 6fr); }
+#mp-add-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; line-height: 1; }
+#mp-add-button > .ti { line-height: 1; }
+.mp-article-header-actions { display: flex; align-items: center; gap: 8px; }
+.mp-article-page-size-control { width: 126px; }
+.mp-article-page-size-control .select-trigger { width: 100%; min-height: 34px; height: 34px; border: 1px solid var(--control-border); border-radius: 5px; background: var(--control-surface); padding: 6px 9px; color: var(--ink); font-size: 12px; }
+.mp-article-page-size-control .select-menu { min-width: 100%; }
+.mp-article-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 12px; }
+.mp-pagination-meta { display: flex; align-items: center; gap: 10px; }
+.mp-pagination-meta p { margin: 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.mp-page-controls { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.mp-page-nav,
+.mp-page-number { display: inline-flex; flex: 0 0 32px; width: 32px; min-width: 32px; min-height: 32px; height: 32px; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--ink); padding: 0; font-size: 12px; line-height: 1; }
+.mp-page-nav:not(:disabled):hover,
+.mp-page-number:not(.is-current):hover { background: var(--soft); color: var(--primary); }
+.mp-page-nav:focus-visible,
+.mp-page-number:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.mp-page-number.is-current { border-color: rgba(168, 82, 31, .16); background: rgba(168, 82, 31, .12); color: var(--primary); font-weight: 700; }
+.mp-page-ellipsis { display: inline-flex; flex: 0 0 20px; width: 20px; height: 32px; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; line-height: 1; }
+.mp-page-nav > .ti { line-height: 1; }
+
+@media (max-width: 1100px) {
+  .mp-content-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .mp-page { padding: 28px 20px 44px; }
+  .mp-article-header-actions { width: 100%; justify-content: space-between; }
+  .mp-subscriptions-section.mp-articles-section > header { align-items: flex-start; flex-direction: column; }
+  .mp-article-pagination { align-items: flex-start; flex-direction: column; }
+  .mp-pagination-meta { width: 100%; justify-content: space-between; }
+  .mp-page-controls { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+}

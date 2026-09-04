@@ -2,18 +2,20 @@ services:
   # Compose 内部服务标识。
   paperleaf:
     build:
-      # v0.0.3 源码目录作为镜像构建上下文。
+      # 项目源码目录作为镜像构建上下文。
       context: ..
       # Dockerfile 相对于构建上下文的位置。
       dockerfile: docker/Dockerfile
     # 容器命名规则：PaperLeaf_v<版本号>。
-    container_name: PaperLeaf_v0.0.3
+    container_name: PaperLeaf_v1.0.0
     labels:
-      com.paperleaf.version: "0.0.3"
+      com.paperleaf.version: "1.0.0"
       com.paperleaf.api-docs: "/api-docs.html"
       com.paperleaf.api-docs-navigation: "expandable"
     # Docker 或宿主机重启后自动恢复；手动停止时保持停止。
     restart: unless-stopped
+    # 负责回收 Chromium 子进程，避免 PDF/微信读书保活任务在容器中留下僵尸进程。
+    init: true
     ports:
       # 宿主机端口可通过 docker/.env 中的 PAPERLEAF_PORT 修改；容器应用端口固定为 3080。
       - "${PAPERLEAF_PORT:-3080}:3080"
@@ -30,6 +32,10 @@ services:
       PAPERLEAF_ADMIN_PASSWORD: ${PAPERLEAF_ADMIN_PASSWORD:-admin123}
       # 文章 HTML、PDF 与本地图片的容器内目录；由下方 Library 挂载持久化。
       PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
+      # 容器内 Chromium：用于按需生成文章 PDF。
+      PAPERLEAF_PDF_BROWSER: /usr/bin/chromium
+      # 容器内 Chromium：用于微信读书授权 Profile 的自动保活；Profile 保存在 /app/data 并随 data 挂载持久化。
+      PAPERLEAF_WEREAD_BROWSER: /usr/bin/chromium
     volumes:
       # 宿主机 data：数据库和应用配置，对应 PAPERLEAF_DATA_DIR。
       - ../../data:/app/data

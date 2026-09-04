@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PaperLeaf · 纸笺",
-  "version": "0.0.3",
+  "version": "1.0.0",
   "description": "将当前网页或选中文字保存到 PaperLeaf 纸笺。",
   "action": {
     "default_title": "保存到纸笺",

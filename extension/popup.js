@@ -14,7 +14,7 @@ function updateWebAppLink(server = currentConfig().server) { const target = norm
 function pageDraft() { return { title: byId('title').value, url: byId('url').value, tagInput: byId('tag-input').value }; }
 function draftPayload() { return { view: state.view, mode: state.mode, selectedTags: state.selectedTags, page: pageDraft(), settings: currentConfig(), savedItem: state.savedItem }; }
 function saveDraft() { return draftStorage.set({ [draftKey]: draftPayload() }); }
-function setResultActionsDisabled(disabled) { ['saved-read', 'saved-favorite', 'saved-archive'].forEach((id) => { byId(id).disabled = disabled; }); }
+function setResultActionsDisabled(disabled) { ['saved-refetch', 'saved-read', 'saved-favorite', 'saved-archive'].forEach((id) => { byId(id).disabled = disabled; }); }
 function setSaveProgress(value) { state.saveProgress = Math.max(0, Math.min(100, Number(value) || 0)); byId('saved-progress-bar').style.width = `${state.saveProgress}%`; byId('saved-progress-track').setAttribute('aria-valuenow', String(state.saveProgress)); }
 function renderResult() {
   const item = state.savedItem;
@@ -22,7 +22,7 @@ function renderResult() {
   byId('saved-url').textContent = item?.url || byId('url').value || '—';
   const tags = (item?.tags || state.selectedTags).map((tag) => typeof tag === 'string' ? tag : tag?.name).filter(Boolean);
   byId('saved-tags').textContent = tags.length ? tags.map((tag) => `#${tag}`).join(' ') : '未添加标签';
-  const progress = item?.fetch_status === 'failed' ? '链接已保存；网页抓取失败，可稍后重新抓取。' : item ? '已保存，文章已收录至PaperLeaf。' : '正在保存并归档网页…';
+  const progress = item?.fetch_status === 'failed' ? '链接已保存；网页抓取失败，可稍后重新抓取。' : item?.fetch_warning ? '已保存；服务器未能访问原站，当前正文来自浏览器。' : item ? '已保存，文章已收录至PaperLeaf。' : '正在保存并归档网页…';
   byId('saved-progress').textContent = progress;
   setSaveProgress(item ? 100 : state.saveProgress || 12);
   [['saved-read', 'is_read', '标记为已读', '已标记为已读'], ['saved-favorite', 'is_favorite', '收藏', '已收藏'], ['saved-archive', 'is_archived', '归档', '已归档']].forEach(([id, key, defaultLabel, activeLabel]) => {
@@ -77,7 +77,23 @@ async function loadTags() { const config = currentConfig(); if (!validConfig(con
 async function loadPage() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isHttpUrl(tab.url)) { state.page = { ...blankPage(), url: tab?.url || '' }; byId('title').value = ''; byId('url').value = state.page.url; byId('selection').value = ''; showMessage('请停留在 HTTP 或 HTTPS 网页中使用小程序。'); return; }
-  try { const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => { const article = document.querySelector('.Post-RichText') || document.querySelector('article'); return { title: document.title, url: location.href, selection: window.getSelection()?.toString().trim().slice(0, 4000) || '', htmlSnapshot: article?.outerHTML.slice(0, 1_000_000) || '' }; } }); state.page = result || { ...blankPage(), title: tab.title || '', url: tab.url }; } catch { state.page = { ...blankPage(), title: tab.title || '', url: tab.url }; }
+  try { const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+    const documents = [];
+    const collect = (doc) => {
+      documents.push(doc);
+      for (const frame of doc.querySelectorAll('iframe')) {
+        try { if (frame.contentDocument) collect(frame.contentDocument); } catch { /* Cross-origin frames are intentionally skipped. */ }
+      }
+    };
+    collect(document);
+    const candidates = documents.map((doc) => {
+      const article = doc.querySelector('.Post-RichText') || doc.querySelector('article');
+      const root = article?.innerText?.trim() ? article : doc.body;
+      return root ? { title: doc.title, html: root.outerHTML, length: root.innerText?.trim().length || 0 } : null;
+    }).filter(Boolean);
+    const best = candidates.reduce((current, candidate) => candidate.length > (current?.length || 0) ? candidate : current, null);
+    return { title: best?.title || document.title, url: location.href, selection: window.getSelection()?.toString().trim().slice(0, 4000) || '', htmlSnapshot: best?.html.slice(0, 1_000_000) || '' };
+  } }); state.page = result || { ...blankPage(), title: tab.title || '', url: tab.url }; } catch { state.page = { ...blankPage(), title: tab.title || '', url: tab.url }; }
   byId('title').value = state.page.title || tab.title || ''; byId('url').value = state.page.url || tab.url || ''; byId('selection').value = state.page.selection;
 }
 async function refreshCurrentPageForSave() {
@@ -104,6 +120,16 @@ async function updateSavedItem(field) {
   const button = byId(field === 'is_read' ? 'saved-read' : field === 'is_favorite' ? 'saved-favorite' : 'saved-archive'); button.disabled = true;
   try { const result = await responseData(await fetch(`${config.server}/api/v1/bookmarks/${encodeURIComponent(item.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` }, body: JSON.stringify({ [field]: !Boolean(item[field]) }) })); state.savedItem = result; renderResult(); await saveDraft(); showMessage('文章状态已更新。', true); } catch (error) { showMessage(error.message || '文章状态更新失败。'); } finally { if (state.savedItem) renderResult(); }
 }
+async function refreshSavedSnapshot() {
+  const item = state.savedItem; const config = currentConfig(); if (!item || !validConfig(config)) return;
+  const button = byId('saved-refetch'); button.disabled = true;
+  try {
+    await refreshCurrentPageForSave();
+    if (!state.page.htmlSnapshot) throw new Error('当前网页没有可保存的文章正文，请先打开原文并等待页面加载完成。');
+    const result = await responseData(await fetch(`${config.server}/api/v1/bookmarks/${encodeURIComponent(item.id)}/refetch`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` }, body: JSON.stringify({ url: state.page.url, title: byId('title').value.trim(), htmlSnapshot: state.page.htmlSnapshot }) }));
+    state.savedItem = result; renderResult(); await saveDraft(); showMessage('文章正文已从当前浏览器页面更新。', true);
+  } catch (error) { showMessage(error.message || '文章正文更新失败。'); } finally { if (state.savedItem) renderResult(); }
+}
 async function saveCapture() {
   const config = currentConfig();
   if (!validConfig(config)) { setView('settings'); return showMessage('请先完成服务器地址和 API Token 配置。'); }
@@ -117,7 +143,7 @@ async function saveCapture() {
     const itemResult = await responseData(await fetch(`${config.server}/api/v1/items`, { method: 'POST', headers, body: JSON.stringify({ url, title, tags: state.selectedTags, htmlSnapshot: state.page.htmlSnapshot || undefined }) }));
     state.saveProgress = 72; renderResult();
     if (state.mode === 'selection') await responseData(await fetch(`${config.server}/api/v1/items/${encodeURIComponent(itemResult.item.id)}/highlights`, { method: 'POST', headers, body: JSON.stringify({ text: selection }) }));
-    state.savedItem = itemResult.item; state.saveProgress = 100; renderResult(); await saveDraft(); showMessage(itemResult.item.fetch_status === 'failed' ? '链接已保存，但网页抓取失败。' : '', true); await loadTags();
+    state.savedItem = itemResult.item; state.saveProgress = 100; renderResult(); await saveDraft(); showMessage(itemResult.item.fetch_status === 'failed' ? '链接已保存，但网页抓取失败。' : itemResult.item.fetch_warning ? '已保存浏览器中的文章正文；原网站拒绝了服务器抓取。' : '', true); await loadTags();
   } catch (error) { state.savedItem = null; setView('capture'); showMessage(error.message || '网络连接失败。'); } finally { state.saving = false; byId('save').disabled = false; renderResult(); void saveDraft(); }
 }
 const eyeIcon = (visible) => visible ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"></path><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"></path><path d="M9.9 4.2A10.8 10.8 0 0 1 12 4c6.5 0 10 8 10 8a18.4 18.4 0 0 1-3 4.1M6.6 6.6C3.8 8.5 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 3.4-.6"></path></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>';
@@ -127,6 +153,7 @@ byId('save-settings').addEventListener('click', saveSettings);
 byId('test-connection').addEventListener('click', testConnection);
 byId('save').addEventListener('click', saveCapture);
 byId('save-another').addEventListener('click', () => { state.savedItem = null; setView('capture'); });
+byId('saved-refetch').addEventListener('click', refreshSavedSnapshot);
 byId('saved-read').addEventListener('click', () => updateSavedItem('is_read'));
 byId('saved-favorite').addEventListener('click', () => updateSavedItem('is_favorite'));
 byId('saved-archive').addEventListener('click', () => updateSavedItem('is_archived'));

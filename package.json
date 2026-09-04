@@ -1,27 +1,30 @@
 {
-  "name": "paperleaf-v0.0.3",
-  "description": "PaperLeaf (纸笺) v0.0.3 web reading archive.",
-  "version": "0.0.3",
+  "name": "paperleaf",
+  "description": "PaperLeaf (纸笺) v1.0.0 web reading archive.",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
-    "check": "node --check server.mjs && node ../tests/v0.0.3/snapshot-cleanup.mjs",
-    "test:api": "node ../tests/v0.0.3/api-smoke.mjs",
-    "test:browser": "node ../tests/v0.0.3/browser-smoke.mjs",
-    "test:tags": "node ../tests/v0.0.3/tag-management-smoke.mjs",
-    "test:home-preferences": "node ../tests/v0.0.3/home-preferences-smoke.mjs",
-    "test:api-tokens": "node ../tests/v0.0.3/api-token-settings-smoke.mjs",
-    "test:reader-timeline": "node ../tests/v0.0.3/reader-timeline-detail-smoke.mjs",
-    "test:extension": "node --check extension/popup.js && node ../tests/v0.0.3/extension-smoke.mjs",
-    "test:extension-live": "node ../tests/v0.0.3/extension-live-smoke.mjs",
-    "test:repeated-capture-live": "node ../tests/v0.0.3/repeated-capture-live-smoke.mjs",
-    "test:service-backup": "node ../tests/v0.0.3/service-backup-smoke.mjs",
-    "test:api-docs": "node ../tests/v0.0.3/api-docs-page-smoke.mjs"
+    "check": "node --check server.mjs && node ../tests/v0.0.4/snapshot-cleanup.mjs",
+    "test:api": "node ../tests/v0.0.4/api-smoke.mjs",
+    "test:browser": "node ../tests/v0.0.4/browser-smoke.mjs",
+    "test:tags": "node ../tests/v0.0.4/tag-management-smoke.mjs",
+    "test:home-preferences": "node ../tests/v0.0.4/home-preferences-smoke.mjs",
+    "test:api-tokens": "node ../tests/v0.0.4/api-token-settings-smoke.mjs",
+    "test:reader-timeline": "node ../tests/v0.0.4/reader-timeline-detail-smoke.mjs",
+    "test:extension": "node --check extension/popup.js && node ../tests/v0.0.4/extension-smoke.mjs",
+    "test:extension-live": "node ../tests/v0.0.4/extension-live-smoke.mjs",
+    "test:repeated-capture-live": "node ../tests/v0.0.4/repeated-capture-live-smoke.mjs",
+    "test:service-backup": "node ../tests/v0.0.4/service-backup-smoke.mjs",
+    "test:mp": "node ../tests/v0.0.4/mp-subscriptions-smoke.mjs",
+    "test:regression": "node ../tests/v0.0.4/isolated-regression.mjs",
+    "test:api-docs": "node ../tests/v0.0.4/api-docs-page-smoke.mjs"
   },
   "dependencies": {
-    "playwright-core": "1.55.0"
+    "playwright-core": "1.55.0",
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": ">=22.5.0"

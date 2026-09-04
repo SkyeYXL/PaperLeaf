@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import QRCode from 'qrcode';
 import { DatabaseSync } from 'node:sqlite';
 
 const scrypt = promisify(scryptCallback);
@@ -27,6 +28,13 @@ let tokenEncryptionSecret = configuredTokenSecret || (existsSync(tokenKeyPath) ?
 let tokenEncryptionKey = createHash('sha256').update(tokenEncryptionSecret).digest();
 
 const now = () => new Date().toISOString();
+// 微信读书公众号接口仅返回最新一篇文章；默认每小时检查一次，用户可调整同步频率。
+const mpSyncMinutes = 60;
+const mpSyncMinuteOptions = new Set([60, 240, 360, 480, 720, 1440]);
+const mpArticlePageSizeOptions = new Set([10, 20, 50, 100]);
+// Both administrator backup entry points must preserve the same user-owned data.
+// Authentication cookies, deduplication records and sync logs are intentionally excluded.
+const serviceBackupTables = Object.freeze(['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events', 'mp_sync_settings', 'mp_subscriptions']);
 const id = (prefix) => `${prefix}_${randomBytes(12).toString('hex')}`;
 const tokenHash = (value) => createHash('sha256').update(value).digest('hex');
 const encryptToken = (value) => { const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', tokenEncryptionKey, iv); const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${encrypted.toString('base64url')}`; };
@@ -39,7 +47,7 @@ function migrate() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, fetch_warning TEXT, source_type TEXT NOT NULL DEFAULT 'web', source_label TEXT NOT NULL DEFAULT '', mp_image_url TEXT NOT NULL DEFAULT '', is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS tags (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(user_id, name));
     CREATE TABLE IF NOT EXISTS item_tags (item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE, PRIMARY KEY(item_id, tag_id));
     CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(user_id, name));
@@ -49,19 +57,44 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, target_id TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS user_preferences (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, homepage_view TEXT NOT NULL DEFAULT 'list', reader_display TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS timeline_events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, item_id TEXT NOT NULL, highlight_id TEXT, event_type TEXT NOT NULL, occurred_at TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS weread_auth (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, encrypted_cookie TEXT NOT NULL, vid TEXT NOT NULL, account_name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', verified_at TEXT NOT NULL, keepalive_at TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS mp_sync_settings (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, refresh_minutes INTEGER NOT NULL DEFAULT 60, last_run_at TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS mp_subscriptions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, book_id TEXT NOT NULL, name TEXT NOT NULL, cover_url TEXT NOT NULL DEFAULT '', rss_token TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, latest_title TEXT NOT NULL DEFAULT '', last_sync_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, book_id));
+    CREATE TABLE IF NOT EXISTS mp_review_records (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, subscription_id TEXT NOT NULL REFERENCES mp_subscriptions(id) ON DELETE CASCADE, review_id TEXT NOT NULL, item_id TEXT REFERENCES items(id) ON DELETE SET NULL, content_status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(subscription_id, review_id));
+    CREATE TABLE IF NOT EXISTS mp_sync_runs (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, discovered_count INTEGER NOT NULL DEFAULT 0, imported_count INTEGER NOT NULL DEFAULT 0, error_message TEXT);
   `);
   const itemColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
   if (!itemColumns.includes('reading_progress')) db.exec('ALTER TABLE items ADD COLUMN reading_progress REAL NOT NULL DEFAULT 0');
   if (!itemColumns.includes('last_opened_at')) db.exec('ALTER TABLE items ADD COLUMN last_opened_at TEXT');
   if (!itemColumns.includes('archive_folder')) db.exec("ALTER TABLE items ADD COLUMN archive_folder TEXT NOT NULL DEFAULT ''");
+  if (!itemColumns.includes('fetch_warning')) db.exec('ALTER TABLE items ADD COLUMN fetch_warning TEXT');
+  if (!itemColumns.includes('source_type')) db.exec("ALTER TABLE items ADD COLUMN source_type TEXT NOT NULL DEFAULT 'web'");
+  if (!itemColumns.includes('source_label')) db.exec("ALTER TABLE items ADD COLUMN source_label TEXT NOT NULL DEFAULT ''");
+  if (!itemColumns.includes('mp_image_url')) db.exec("ALTER TABLE items ADD COLUMN mp_image_url TEXT NOT NULL DEFAULT ''");
+  const wereadAuthColumns = db.prepare('PRAGMA table_info(weread_auth)').all().map((column) => column.name);
+  if (!wereadAuthColumns.includes('keepalive_at')) db.exec('ALTER TABLE weread_auth ADD COLUMN keepalive_at TEXT');
+  const mpSubscriptionColumns = db.prepare('PRAGMA table_info(mp_subscriptions)').all().map((column) => column.name);
+  if (!mpSubscriptionColumns.includes('rss_token')) db.exec("ALTER TABLE mp_subscriptions ADD COLUMN rss_token TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
+  // v0.0.4 早期版本曾强制每天同步一次；仅首次升级时将该旧默认值迁移为每小时，
+  // 之后保留用户在“同步频率”中保存的选择。
+  if (!db.prepare('SELECT name FROM app_migrations WHERE name=?').get('mp-sync-frequency-v2')) {
+    db.prepare('UPDATE mp_sync_settings SET refresh_minutes=?,updated_at=? WHERE refresh_minutes=?').run(mpSyncMinutes, now(), 1440);
+    db.prepare('INSERT INTO app_migrations (name,applied_at) VALUES (?,?)').run('mp-sync-frequency-v2', now());
+  }
+  db.prepare(`UPDATE mp_sync_settings SET refresh_minutes=?,updated_at=? WHERE refresh_minutes NOT IN (${[...mpSyncMinuteOptions].join(',')})`).run(mpSyncMinutes, now());
+  db.prepare("SELECT id FROM mp_subscriptions WHERE rss_token='' OR rss_token IS NULL").all().forEach((subscription) => {
+    db.prepare('UPDATE mp_subscriptions SET rss_token=? WHERE id=?').run(id('rss'), subscription.id);
+  });
+  db.exec(`UPDATE items SET source_type='mp',source_label=COALESCE((SELECT s.name FROM mp_review_records r LEFT JOIN mp_subscriptions s ON s.id=r.subscription_id WHERE r.item_id=items.id LIMIT 1),'') WHERE source_type <> 'mp' AND EXISTS (SELECT 1 FROM mp_review_records r WHERE r.item_id=items.id)`);
   const itemSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='items'").get()?.sql || '';
   if (/UNIQUE\s*\(\s*user_id\s*,\s*normalized_url\s*\)/i.test(itemSchema)) {
     db.exec('PRAGMA foreign_keys=OFF');
     try {
       db.exec(`BEGIN IMMEDIATE;
-        CREATE TABLE items_repeated_capture (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archive_folder TEXT NOT NULL DEFAULT '');
-        INSERT INTO items_repeated_capture (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder)
-          SELECT id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder FROM items;
+        CREATE TABLE items_repeated_capture (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, url TEXT NOT NULL, normalized_url TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', html_snapshot TEXT NOT NULL DEFAULT '', fetch_status TEXT NOT NULL, fetch_error TEXT, fetch_warning TEXT, source_type TEXT NOT NULL DEFAULT 'web', source_label TEXT NOT NULL DEFAULT '', mp_image_url TEXT NOT NULL DEFAULT '', is_read INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0, reading_progress REAL NOT NULL DEFAULT 0, last_opened_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archive_folder TEXT NOT NULL DEFAULT '');
+        INSERT INTO items_repeated_capture (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,fetch_warning,source_type,source_label,mp_image_url,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder)
+          SELECT id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,fetch_warning,source_type,source_label,mp_image_url,is_read,is_archived,is_favorite,reading_progress,last_opened_at,created_at,updated_at,archive_folder FROM items;
         DROP TABLE items;
         ALTER TABLE items_repeated_capture RENAME TO items;
       COMMIT;`);
@@ -89,6 +122,8 @@ function migrate() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_user_occurred_at ON timeline_events(user_id, occurred_at DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_item_occurred_at ON timeline_events(item_id, occurred_at DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_timeline_events_highlight_occurred_at ON timeline_events(highlight_id, occurred_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_mp_subscriptions_user_updated_at ON mp_subscriptions(user_id, updated_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_mp_sync_runs_user_started_at ON mp_sync_runs(user_id, started_at DESC)');
   // Deletion is destructive to an article's reading trail: do not retain orphan entries.
   db.exec(`DELETE FROM timeline_events
     WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id=timeline_events.item_id AND i.user_id=timeline_events.user_id)
@@ -160,7 +195,7 @@ function isVerificationPage(source, pageUrl) {
   if (host !== 'mp.weixin.qq.com') return false;
   return /wappoc_appmsgcaptcha|环境异常|完成验证后即可继续访问|去验证/i.test(source);
 }
-async function fetchPage(input) {
+async function fetchPageHttp(input) {
   let url = publicUrl(unwrapWechatArticleUrl(input)).toString();
   for (let redirects = 0; redirects < 4; redirects += 1) {
     const controller = new AbortController();
@@ -184,6 +219,65 @@ async function fetchPage(input) {
   }
   throw new Error('重定向次数过多。');
 }
+async function fetchPageInBrowser(input) {
+  const url = publicUrl(unwrapWechatArticleUrl(input)).toString();
+  const executable = process.env.PAPERLEAF_CAPTURE_BROWSER || pdfBrowserExecutable();
+  if (!executable) throw new Error('未找到可用的 Chromium 浏览器。');
+  const browser = await pdfChromium().launch({ headless: true, executablePath: executable, args: ['--no-sandbox', '--disable-gpu'] });
+  try {
+    const page = await browser.newPage({ locale: 'zh-CN', userAgent: pageHeaders['User-Agent'] });
+    await page.route('**/*', (route) => {
+      const request = route.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        try { publicUrl(request.url()); } catch { return route.abort(); }
+      }
+      return route.continue();
+    });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => undefined);
+    const finalUrl = publicUrl(page.url()).toString();
+    if (!response?.ok()) throw new Error(`浏览器访问网页返回 HTTP ${response?.status() ?? '未知'}。`);
+    const source = await page.content();
+    if (isVerificationPage(source, finalUrl)) throw new Error('目标站要求浏览器验证，未保存验证页。');
+    // Some public document services (such as KDocs knowledge bases) keep the
+    // rendered document in one or more same-origin iframes.  Capturing only
+    // page.content() would preserve the application shell instead of the
+    // readable document.  Do not follow cross-origin frames: they are not part
+    // of the requested document and may be unrelated embeds or advertisements.
+    const pageOrigin = new URL(finalUrl).origin;
+    const candidates = await Promise.all(page.frames().map(async (frame) => {
+      let frameUrl;
+      try { frameUrl = publicUrl(frame.url()).toString(); }
+      catch { return null; }
+      if (frame !== page.mainFrame() && new URL(frameUrl).origin !== pageOrigin) return null;
+      try {
+        const frameSource = frame === page.mainFrame() ? source : await frame.content();
+        return { url: frameUrl, page: sanitizeDocument(frameSource, frameUrl) };
+      } catch { return null; }
+    }));
+    const selected = candidates.filter(Boolean).reduce((best, candidate) => {
+      const bestScore = best ? (best.page.textLength * 10_000) + best.page.imageCount : -1;
+      const candidateScore = (candidate.page.textLength * 10_000) + candidate.page.imageCount;
+      return candidateScore > bestScore ? candidate : best;
+    }, null);
+    const captured = selected?.page || sanitizeDocument(source, finalUrl);
+    if (!captured.textLength && !captured.imageCount) throw new Error('浏览器已打开网页，但未获得可提取的正文。');
+    return { url: selected?.url || finalUrl, ...captured };
+  } finally {
+    await browser.close();
+  }
+}
+async function fetchPage(input) {
+  try {
+    return await fetchPageHttp(input);
+  } catch (httpError) {
+    try {
+      return await fetchPageInBrowser(input);
+    } catch (browserError) {
+      throw new Error(`${httpError.message}；浏览器渲染备用抓取失败：${browserError.message}`);
+    }
+  }
+}
 function clientSnapshotPage(payload, sourceUrl) {
   const source = String(payload?.htmlSnapshot || '').trim();
   if (!source) return null;
@@ -191,13 +285,24 @@ function clientSnapshotPage(payload, sourceUrl) {
   return page.textLength || page.imageCount ? { url: sourceUrl, ...page } : null;
 }
 function textOnly(value = '') { return String(value).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function decodeHtmlEntities(value) {
+  let decoded = String(value || '');
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = decoded.replace(/&(?:(#x[0-9a-f]+)|(#\d+)|(amp|quot|lt|gt));/gi, (_match, hex, decimal, named) => {
+      if (named) return ({ amp: '&', quot: '"', lt: '<', gt: '>' }[named.toLowerCase()] || _match);
+      const codePoint = Number.parseInt(hex ? hex.slice(2) : decimal.slice(1), hex ? 16 : 10);
+      return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : _match;
+    });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
 function safeImageUrl(value, baseUrl) {
   try {
-    let decoded = String(value || '');
-    // Some publishers HTML-encode lazy-image URLs more than once.
-    for (let pass = 0; pass < 3 && /&(amp|quot|#0*39|#x0*27|lt|gt);/i.test(decoded); pass += 1) {
-      decoded = decoded.replace(/&(amp|quot|#0*39|#x0*27|lt|gt);/gi, (_match, entity) => ({ amp: '&', quot: '"', lt: '<', gt: '>', '#39': "'", '#x27': "'" }[entity.toLowerCase()] || _match));
-    }
+    // Publishers can nest named and numeric entities in signed image URLs,
+    // e.g. &amp;#x26; must become a literal query-string ampersand.
+    const decoded = decodeHtmlEntities(value);
     const url = new URL(decoded, baseUrl);
     return ['http:', 'https:'].includes(url.protocol) ? url.toString() : '';
   } catch { return ''; }
@@ -550,6 +655,386 @@ function normalizedName(value, { tag = false, maxLength }) {
   if (!name || name.length > maxLength || /[\u0000-\u001f\u007f]/.test(name) || (tag && /\s/.test(name))) return '';
   return name;
 }
+const WEREAD_BASE = 'https://weread.qq.com';
+const wereadQrSessions = new Map();
+const wereadKeepAliveInFlight = new Map();
+const wereadBrowserProfileInFlight = new Map();
+const mpSyncInFlight = new Map();
+const wereadKeepAliveIntervalMs = 6 * 60 * 60 * 1000;
+const wereadHeaders = {
+  'User-Agent': pageHeaders['User-Agent'],
+  Accept: 'application/json, text/plain, */*',
+  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  Origin: WEREAD_BASE,
+  Referer: `${WEREAD_BASE}/`
+};
+class WereadError extends Error { constructor(code, message) { super(message); this.code = code; } }
+function setCookieMap(target, headers) {
+  const values = typeof headers?.getSetCookie === 'function' ? headers.getSetCookie() : (headers?.get('set-cookie') ? [headers.get('set-cookie')] : []);
+  for (const value of values) {
+    const pair = String(value).split(';', 1)[0]; const index = pair.indexOf('=');
+    if (index > 0) target.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim());
+  }
+}
+function cookieHeader(cookieMap) { return [...cookieMap.entries()].map(([key, value]) => `${key}=${value}`).join('; '); }
+function cookieMapFromHeader(value) {
+  const jar = new Map();
+  for (const part of String(value || '').split(';')) {
+    const item = part.trim(); const index = item.indexOf('=');
+    if (index > 0) jar.set(item.slice(0, index).trim(), item.slice(index + 1).trim());
+  }
+  return jar;
+}
+function wereadProfileDirectory(userId) {
+  // 不使用原始用户 ID 作为目录名，避免泄露标识，也防止路径拼接风险。
+  return join(dataDir, 'weread-browser-profiles', createHash('sha256').update(String(userId)).digest('hex'));
+}
+function clearWereadProfileSingletonLocks(profile) {
+  // Chromium 在容器被强制停止时可能遗留单实例锁；只移除 Profile 根目录内的锁本身，绝不递归清理登录数据。
+  for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    const target = join(profile, name);
+    try { rmSync(target, { force: true }); } catch { /* 下次启动或 renewal 回退会继续处理。 */ }
+  }
+}
+function isWereadProfileLockError(error) { return /singleton(lock|cookie|socket)|process singleton|user data directory is already in use/i.test(String(error?.message || '')); }
+function removeWereadBrowserProfile(userId) {
+  const profileRoot = join(dataDir, 'weread-browser-profiles'); const profile = wereadProfileDirectory(userId);
+  const child = relative(profileRoot, profile);
+  if (child && !child.startsWith(`..${sep}`) && child !== '..' && !isAbsolute(child) && existsSync(profile)) rmSync(profile, { recursive: true, force: true });
+}
+function wereadBrowserExecutable() { return process.env.PAPERLEAF_WEREAD_BROWSER || pdfBrowserExecutable(); }
+function wereadReaderUrl(userId) {
+  const row = db.prepare('SELECT book_id FROM mp_subscriptions WHERE user_id=? AND enabled=1 ORDER BY created_at ASC LIMIT 1').get(userId);
+  return row?.book_id ? `${WEREAD_BASE}/web/mp/reader/${encodeURIComponent(row.book_id)}` : `${WEREAD_BASE}/`;
+}
+async function openWereadBrowserProfile(userId, cookie, { navigate = false } = {}) {
+  const earlier = wereadBrowserProfileInFlight.get(userId) || Promise.resolve();
+  const task = earlier.catch(() => undefined).then(async () => {
+    const executable = wereadBrowserExecutable();
+    if (!executable) throw new WereadError('WEREAD_BROWSER_UNAVAILABLE', '未找到可用于微信读书自动保活的本机浏览器。');
+    const launch = { headless: true, args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'] };
+    if (executable !== 'chromium') launch.executablePath = executable;
+    const profile = wereadProfileDirectory(userId);
+    let context;
+    try {
+      try { context = await pdfChromium().launchPersistentContext(profile, launch); }
+      catch (error) {
+        if (!isWereadProfileLockError(error)) throw error;
+        clearWereadProfileSingletonLocks(profile);
+        context = await pdfChromium().launchPersistentContext(profile, launch);
+      }
+      const jar = cookieMapFromHeader(cookie);
+      const browserCookies = [...jar.entries()].filter(([, value]) => value).map(([name, value]) => ({ name, value, url: WEREAD_BASE }));
+      if (browserCookies.length) await context.addCookies(browserCookies);
+      if (navigate) {
+        const page = await context.newPage();
+        try { await page.goto(wereadReaderUrl(userId), { waitUntil: 'domcontentloaded', timeout: 30_000 }); }
+        catch { /* 即使 reader 页重定向或超时，Cookie jar 仍可能已被刷新。 */ }
+        await page.waitForTimeout(1_200);
+      }
+      const refreshed = new Map((await context.cookies(WEREAD_BASE)).map((entry) => [entry.name, entry.value]));
+      return cookieHeader(refreshed) || cookie;
+    } finally {
+      await context?.close().catch(() => undefined);
+    }
+  });
+  wereadBrowserProfileInFlight.set(userId, task);
+  try { return await task; }
+  finally { if (wereadBrowserProfileInFlight.get(userId) === task) wereadBrowserProfileInFlight.delete(userId); }
+}
+async function seedWereadBrowserProfile(userId, cookie) {
+  // 首次扫码后仅写入独立 Profile；不影响扫码结果，也不把浏览器启动失败暴露给用户。
+  try { await openWereadBrowserProfile(userId, cookie); } catch { /* 下次保活仍会尝试 renewal。 */ }
+}
+function saveWereadAuth(userId, previous, cookie, { keepaliveAt = null } = {}) {
+  const jar = cookieMapFromHeader(cookie); const vid = jar.get('wr_vid') || previous?.vid || '';
+  if (!vid) throw new WereadError('WEREAD_COOKIE_INVALID', '微信读书授权信息不完整，请重新扫码。');
+  const time = now();
+  db.prepare(`INSERT INTO weread_auth (user_id,encrypted_cookie,vid,account_name,status,verified_at,keepalive_at,updated_at) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET encrypted_cookie=excluded.encrypted_cookie,vid=excluded.vid,account_name=excluded.account_name,status='active',verified_at=excluded.verified_at,keepalive_at=excluded.keepalive_at,updated_at=excluded.updated_at`)
+    .run(userId, encryptToken(cookie), vid, previous?.account_name || '', 'active', time, keepaliveAt, time);
+  return userWereadAuth(userId);
+}
+function userWereadAuth(userId) {
+  const row = db.prepare('SELECT * FROM weread_auth WHERE user_id=?').get(userId);
+  if (!row) return null;
+  const cookie = decryptToken(row.encrypted_cookie);
+  return cookie ? { ...row, cookie } : null;
+}
+function publicWereadAuth(userId) {
+  const row = db.prepare('SELECT account_name,status,verified_at,keepalive_at,updated_at FROM weread_auth WHERE user_id=?').get(userId);
+  return row ? { configured: true, accountName: row.account_name || '微信读书账户', status: row.status, verifiedAt: row.verified_at, keepAliveAt: row.keepalive_at, updatedAt: row.updated_at } : { configured: false, status: 'missing' };
+}
+function mpSettings(userId) {
+  let row = db.prepare('SELECT * FROM mp_sync_settings WHERE user_id=?').get(userId);
+  if (!row) {
+    db.prepare('INSERT INTO mp_sync_settings (user_id,refresh_minutes,updated_at) VALUES (?,?,?)').run(userId, mpSyncMinutes, now());
+    row = db.prepare('SELECT * FROM mp_sync_settings WHERE user_id=?').get(userId);
+  }
+  if (!mpSyncMinuteOptions.has(Number(row.refresh_minutes))) {
+    db.prepare('UPDATE mp_sync_settings SET refresh_minutes=?,updated_at=? WHERE user_id=?').run(mpSyncMinutes, now(), userId);
+    row = db.prepare('SELECT * FROM mp_sync_settings WHERE user_id=?').get(userId);
+  }
+  return { syncMinutes: Number(row.refresh_minutes), lastRunAt: row.last_run_at, updatedAt: row.updated_at };
+}
+async function wereadRequest(path, { cookie = '', method = 'GET', body = null } = {}) {
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const headers = { ...wereadHeaders }; if (cookie) headers.Cookie = cookie;
+    if (body) headers['Content-Type'] = 'application/json';
+    const response = await fetch(`${WEREAD_BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal });
+    return response;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new WereadError('WEREAD_TIMEOUT', '微信读书请求超时，请稍后重试。');
+    throw new WereadError('WEREAD_NETWORK', '无法连接微信读书，请检查服务网络后重试。');
+  } finally { clearTimeout(timeout); }
+}
+async function wereadJson(path, options = {}) {
+  const response = await wereadRequest(path, options);
+  let payload = null; try { payload = await response.json(); } catch {}
+  if (!response.ok) {
+    if ([401, 403].includes(response.status)) throw new WereadError(`WEREAD_HTTP_${response.status}`, '微信读书授权已失效，请重新扫码授权。');
+    throw new WereadError('WEREAD_HTTP', `微信读书返回 HTTP ${response.status}。`);
+  }
+  const code = Number(payload?.errCode ?? payload?.errcode ?? 0);
+  if (code && code !== 0) {
+    const message = [-2012, -2010, -2041].includes(code) ? '微信读书授权已失效或被限制，请重新扫码授权。' : '微信读书未接受本次请求，请稍后重试。';
+    throw new WereadError(`WEREAD_${code}`, message);
+  }
+  return { payload: payload || {}, headers: response.headers };
+}
+function isWereadAuthFailure(error) { return error instanceof WereadError && (/^WEREAD_-(2012|2010|2041)$/.test(error.code) || /^WEREAD_HTTP_(401|403)$/.test(error.code)); }
+async function verifyWereadCookie(cookie) {
+  return wereadJson('/web/shelf/sync?userVid=&synckey=0', { cookie });
+}
+async function verifyAndSaveWereadAuth(userId, auth, cookie, { keepaliveAt = null } = {}) {
+  const verified = await verifyWereadCookie(cookie);
+  const jar = cookieMapFromHeader(cookie); setCookieMap(jar, verified.headers);
+  return saveWereadAuth(userId, auth, cookieHeader(jar), { keepaliveAt });
+}
+async function renewWereadCookie(cookie) {
+  const renewed = await wereadJson('/web/login/renewal', { cookie, method: 'POST', body: { rq: '%2Fweb%2Fbook%2Fread', ql: true } });
+  const jar = cookieMapFromHeader(cookie); setCookieMap(jar, renewed.headers);
+  return cookieHeader(jar);
+}
+function markWereadAuthExpired(userId) { db.prepare("UPDATE weread_auth SET status='expired',updated_at=? WHERE user_id=?").run(now(), userId); }
+async function ensureWereadAuth(userId) {
+  if (wereadKeepAliveInFlight.has(userId)) return wereadKeepAliveInFlight.get(userId);
+  const task = (async () => {
+    const stored = userWereadAuth(userId);
+    if (!stored) throw new WereadError('WEREAD_AUTH_REQUIRED', '请先完成微信读书扫码授权。');
+    try {
+      // 每次同步前先用真实书架接口验证。有效时接收服务端下发的新 Cookie，避免只依赖旧 token。
+      let auth = await verifyAndSaveWereadAuth(userId, stored, stored.cookie, { keepaliveAt: stored.keepalive_at || null });
+      const keepaliveDue = !auth.keepalive_at || Date.now() - Date.parse(auth.keepalive_at) >= wereadKeepAliveIntervalMs;
+      if (!keepaliveDue) return auth;
+
+      const attemptedAt = now();
+      // 对齐 werss：复用独立的宿主机浏览器 Profile 打开微信读书页面，重新采集 Cookie。
+      try {
+        const browserCookie = await openWereadBrowserProfile(userId, auth.cookie, { navigate: true });
+        auth = await verifyAndSaveWereadAuth(userId, auth, browserCookie, { keepaliveAt: attemptedAt });
+        return auth;
+      } catch { /* 浏览器不可用或未刷新时，继续走官方 renewal 回退。 */ }
+      try {
+        const renewedCookie = await renewWereadCookie(auth.cookie);
+        auth = await verifyAndSaveWereadAuth(userId, auth, renewedCookie, { keepaliveAt: attemptedAt });
+        return auth;
+      } catch {
+        // 当前 Cookie 已被真实接口验证为有效；本次保活未换取新 token 时继续使用，6 小时后再试。
+        db.prepare('UPDATE weread_auth SET keepalive_at=?,updated_at=? WHERE user_id=?').run(attemptedAt, now(), userId);
+        return userWereadAuth(userId);
+      }
+    } catch (error) {
+      if (!isWereadAuthFailure(error)) throw error;
+      // Cookie 已失效：先复用持久化浏览器登录态，再使用 wr_rt 调 renewal；两者都失败才标记失效。
+      for (const refresh of [
+        async () => openWereadBrowserProfile(userId, stored.cookie, { navigate: true }),
+        async () => renewWereadCookie(stored.cookie)
+      ]) {
+        try { return await verifyAndSaveWereadAuth(userId, stored, await refresh(), { keepaliveAt: now() }); }
+        catch { /* 尝试下一条恢复路径。 */ }
+      }
+      markWereadAuthExpired(userId);
+      throw new WereadError('WEREAD_AUTH_REQUIRED', '微信读书授权已失效，自动保活未能恢复，请重新扫码授权。');
+    }
+  })();
+  wereadKeepAliveInFlight.set(userId, task);
+  try { return await task; } finally { wereadKeepAliveInFlight.delete(userId); }
+}
+function normalizeMpBookId(value) {
+  const raw = decodeURIComponent(String(value || '').trim());
+  const found = raw.match(/MP_WXS_[A-Za-z0-9_]+/);
+  return found ? found[0] : '';
+}
+async function createWereadQr(userId) {
+  const { payload, headers } = await wereadJson('/api/auth/getLoginUid');
+  const uid = String(payload.uid || payload.data?.uid || '');
+  if (!uid) throw new WereadError('WEREAD_QR_UNAVAILABLE', '微信读书未返回登录二维码，请稍后重试。');
+  const jar = new Map(); setCookieMap(jar, headers);
+  const confirmUrl = `${WEREAD_BASE}/web/confirm?uid=${encodeURIComponent(uid)}`;
+  const image = await QRCode.toDataURL(confirmUrl, { errorCorrectionLevel: 'M', margin: 2, width: 300 });
+  wereadQrSessions.set(userId, { uid, jar, createdAt: Date.now() });
+  return { image, expiresIn: 300 };
+}
+async function pollWereadQr(userId) {
+  const session = wereadQrSessions.get(userId);
+  if (!session) throw new WereadError('WEREAD_QR_MISSING', '请先获取新的授权二维码。');
+  if (Date.now() - session.createdAt > 5 * 60_000) { wereadQrSessions.delete(userId); return { state: 'expired', message: '二维码已过期，请重新获取。' }; }
+  const response = await wereadRequest(`/api/auth/getLoginInfo?uid=${encodeURIComponent(session.uid)}&otp=`, { cookie: cookieHeader(session.jar) });
+  setCookieMap(session.jar, response.headers);
+  let payload = {}; try { payload = await response.json(); } catch { throw new WereadError('WEREAD_QR_STATUS', '无法读取微信读书授权状态。'); }
+  const detail = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+  if (!(payload.succeed || detail.succeed)) {
+    const code = payload.logicCode ?? detail.logicCode;
+    if (code === 'NEED_OTP') return { state: 'otp', message: '该微信读书账户要求短信验证码，暂不支持，请改用其他账户或稍后重试。' };
+    if (code === 1 || code === '1') return { state: 'scanned', message: '已扫码，请在手机上确认登录。' };
+    return { state: 'waiting', message: '等待扫码。' };
+  }
+  // 微信读书在不同版本中会把登录资料放在顶层、data 子层，或只通过
+  // Set-Cookie 下发。不要把 accessToken 当作唯一成功条件；最终以真实
+  // 书架接口校验 Cookie 是否可用为准。
+  const nested = detail.data && typeof detail.data === 'object' ? detail.data : {};
+  const sources = [payload, detail, nested];
+  const pick = (names) => {
+    for (const source of sources) for (const name of names) if (source?.[name]) return String(source[name]);
+    return '';
+  };
+  const vid = pick(['webLoginVid', 'vid', 'userVid', 'user_vid']) || session.jar.get('wr_vid') || '';
+  const accessToken = pick(['accessToken', 'access_token', 'token', 'wr_skey', 'skey', 'sessionKey', 'session_key', 'authToken', 'auth_token', 'ticket']);
+  const refreshToken = pick(['refreshToken', 'refresh_token']);
+  if (!vid) throw new WereadError('WEREAD_QR_INCOMPLETE', '扫码成功但未获得用户标识，请重新扫码。');
+  session.jar.set('wr_vid', vid);
+  if (!session.jar.get('wr_skey') && accessToken) session.jar.set('wr_skey', accessToken);
+  if (!session.jar.get('wr_rt') && refreshToken) session.jar.set('wr_rt', encodeURIComponent(refreshToken));
+  let cookie = cookieHeader(session.jar);
+  try { await verifyWereadCookie(cookie); }
+  catch {
+    try {
+      const renewal = await wereadJson('/web/login/renewal', { cookie, method: 'POST', body: { rq: '%2Fweb%2Fbook%2Fread', ql: true } });
+      setCookieMap(session.jar, renewal.headers); cookie = cookieHeader(session.jar); await verifyWereadCookie(cookie);
+    } catch { throw new WereadError('WEREAD_COOKIE_INVALID', '登录成功但 Cookie 校验失败，请重新扫码。'); }
+  }
+  const time = now();
+  db.prepare(`INSERT INTO weread_auth (user_id,encrypted_cookie,vid,account_name,status,verified_at,keepalive_at,updated_at) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET encrypted_cookie=excluded.encrypted_cookie,vid=excluded.vid,status='active',verified_at=excluded.verified_at,keepalive_at=excluded.keepalive_at,updated_at=excluded.updated_at`)
+    .run(userId, encryptToken(cookie), vid, '', 'active', time, time, time);
+  // 异步写入宿主机专用 Profile；失败不影响已通过真实接口校验的扫码授权。
+  void seedWereadBrowserProfile(userId, cookie);
+  wereadQrSessions.delete(userId); audit(userId, 'mp.weread.authorize');
+  return { state: 'success', message: '微信读书授权成功。' };
+}
+async function wereadShelfForUser(userId, currentAuth = null) {
+  const auth = currentAuth || await ensureWereadAuth(userId);
+  try {
+    const { payload } = await wereadJson('/web/shelf/sync?userVid=&synckey=0', { cookie: auth.cookie });
+    return (payload.books || []).filter((book) => String(book.bookId || '').startsWith('MP_WXS_')).map((book) => ({ bookId: String(book.bookId), name: String(book.title || book.bookId), coverUrl: String(book.cover || '') }));
+  } catch (error) {
+    if (isWereadAuthFailure(error)) db.prepare("UPDATE weread_auth SET status='expired',updated_at=? WHERE user_id=?").run(now(), userId);
+    throw error;
+  }
+}
+async function addWereadMpSubscription(userId, rawBookId) {
+  const bookId = normalizeMpBookId(rawBookId);
+  if (!bookId) throw new WereadError('INVALID_MP_BOOK', '请输入有效的微信读书公众号 reader 链接或 MP_WXS 标识。');
+  const auth = await ensureWereadAuth(userId);
+  let shelf = await wereadShelfForUser(userId, auth);
+  if (!shelf.some((book) => book.bookId === bookId)) {
+    await wereadJson('/web/shelf/add', { cookie: auth.cookie, method: 'POST', body: { bookIds: [bookId] } });
+    shelf = await wereadShelfForUser(userId, auth);
+  }
+  const book = shelf.find((entry) => entry.bookId === bookId) || { bookId, name: bookId, coverUrl: '' };
+  const time = now(); let subscription = db.prepare('SELECT * FROM mp_subscriptions WHERE user_id=? AND book_id=?').get(userId, bookId);
+  if (!subscription) {
+    subscription = { id: id('mps') };
+    db.prepare('INSERT INTO mp_subscriptions (id,user_id,book_id,name,cover_url,rss_token,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run(subscription.id, userId, bookId, book.name, book.coverUrl, id('rss'), time, time);
+    audit(userId, 'mp.subscription.create', subscription.id);
+  } else db.prepare('UPDATE mp_subscriptions SET name=?,cover_url=?,enabled=1,updated_at=? WHERE id=?').run(book.name, book.coverUrl, time, subscription.id);
+  return db.prepare('SELECT * FROM mp_subscriptions WHERE user_id=? AND book_id=?').get(userId, bookId);
+}
+function mpArticleUrl(reviewId) { const token = String(reviewId || '').split('_').pop(); return token ? `https://mp.weixin.qq.com/s/${token}` : 'https://mp.weixin.qq.com/'; }
+function mpArticleImageUrl(cover, snapshot, baseUrl) {
+  const coverImage = safeImageUrl(cover?.pic, baseUrl);
+  if (coverImage) return coverImage;
+  const attributes = snapshot.match(/<img\b([^>]*)>/i)?.[1] || '';
+  return safeImageUrl(attributeValue(attributes, 'src'), baseUrl);
+}
+async function persistMpArticle(userId, subscription, cover, reviewId, content, contentStatus) {
+  const articleId = id('itm'); const time = now(); const link = mpArticleUrl(reviewId);
+  const source = content && /\bid=["']js_content["']/i.test(content) ? content : `<article id="js_content">${content || '<p>正文暂未获取成功，请通过原文链接查看。</p>'}</article>`;
+  const page = sanitizeDocument(source, link);
+  const articleImageUrl = mpArticleImageUrl(cover, page.snapshot, link);
+  const title = String(cover.title || subscription.name || '微信公众号文章').slice(0, 300);
+  const draft = { id: articleId, user_id: userId, title, archive_folder: '' }; const archiveFolder = archiveFolderFor(draft); const archive = archiveInfo({ ...draft, archive_folder: archiveFolder }, archiveUser(userId), archiveFolder);
+  let snapshot = page.snapshot; let warning = contentStatus === 'ready' ? null : '正文暂未获取成功，请通过原文链接查看。';
+  try { snapshot = await archiveSnapshot(userId, articleId, snapshot, archive); } catch { warning = `${warning || ''}${warning ? ' ' : ''}本地快照图片未能完全归档。`; }
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT INTO items (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_warning,source_type,source_label,mp_image_url,archive_folder,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(articleId, userId, link, normalizedUrl(link), title, page.summary, snapshot, 'ready', warning, 'mp', subscription.name, articleImageUrl, archiveFolder, time, time);
+    db.prepare('INSERT INTO mp_review_records (id,user_id,subscription_id,review_id,item_id,content_status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('mpr'), userId, subscription.id, reviewId, articleId, contentStatus, time);
+    timelineEvent(userId, articleId, 'item_created', null, time); db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  return articleId;
+}
+async function runMpSync(userId, subscriptionId = null) {
+  if (mpSyncInFlight.has(userId)) return mpSyncInFlight.get(userId);
+  const task = (async () => {
+    const runId = id('mprun'); const startedAt = now(); let discovered = 0; let imported = 0;
+    db.prepare('INSERT INTO mp_sync_runs (id,user_id,started_at,status) VALUES (?,?,?,?)').run(runId, userId, startedAt, 'running');
+    try {
+      const auth = await ensureWereadAuth(userId);
+      const subscriptions = db.prepare(`SELECT * FROM mp_subscriptions WHERE user_id=? AND enabled=1${subscriptionId ? ' AND id=?' : ''} ORDER BY created_at ASC`).all(...(subscriptionId ? [userId, subscriptionId] : [userId]));
+      let shelfByBookId = new Map();
+      try { shelfByBookId = new Map((await wereadShelfForUser(userId, auth)).map((book) => [book.bookId, book])); } catch { /* A cover refresh must not prevent article synchronization. */ }
+      for (const subscription of subscriptions) {
+        try {
+          const { payload: cover } = await wereadJson(`/api/mp/cover?bookId=${encodeURIComponent(subscription.book_id)}`, { cookie: auth.cookie });
+          const reviewId = String(cover.reviewId || ''); if (!reviewId) throw new WereadError('MP_EMPTY_COVER', '该公众号暂未返回最新文章。');
+          discovered += 1;
+          const shelfCover = String(shelfByBookId.get(subscription.book_id)?.coverUrl || subscription.cover_url || '');
+          db.prepare('UPDATE mp_subscriptions SET name=?,cover_url=?,latest_title=?,last_error=NULL,updated_at=? WHERE id=?').run(String(cover.name || subscription.name), shelfCover, String(cover.title || ''), now(), subscription.id);
+          if (!db.prepare('SELECT id FROM mp_review_records WHERE subscription_id=? AND review_id=?').get(subscription.id, reviewId)) {
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 2000));
+            let content = ''; let contentStatus = 'ready';
+            try { const response = await wereadRequest(`/web/mp/content?reviewId=${encodeURIComponent(reviewId)}`, { cookie: auth.cookie }); if (!response.ok) throw new Error(); const source = await response.text(); if (!/\bid=["']js_content["']/i.test(source)) throw new Error(); content = source; }
+            catch { contentStatus = 'failed'; }
+            await persistMpArticle(userId, subscription, cover, reviewId, content, contentStatus); imported += 1;
+          }
+          db.prepare('UPDATE mp_subscriptions SET last_sync_at=?,last_error=NULL,updated_at=? WHERE id=?').run(now(), now(), subscription.id);
+        } catch (error) { if (isWereadAuthFailure(error)) db.prepare("UPDATE weread_auth SET status='expired',updated_at=? WHERE user_id=?").run(now(), userId); db.prepare('UPDATE mp_subscriptions SET last_error=?,updated_at=? WHERE id=?').run(error instanceof WereadError ? error.message : '本次同步失败，请稍后重试。', now(), subscription.id); }
+      }
+      db.prepare('UPDATE mp_sync_settings SET last_run_at=?,updated_at=? WHERE user_id=?').run(now(), now(), userId);
+      db.prepare('UPDATE mp_sync_runs SET finished_at=?,status=?,discovered_count=?,imported_count=? WHERE id=?').run(now(), 'success', discovered, imported, runId);
+      audit(userId, 'mp.sync', runId); return { discovered, imported };
+    } catch (error) {
+      if (isWereadAuthFailure(error)) db.prepare("UPDATE weread_auth SET status='expired',updated_at=? WHERE user_id=?").run(now(), userId);
+      db.prepare('UPDATE mp_sync_runs SET finished_at=?,status=?,discovered_count=?,imported_count=?,error_message=? WHERE id=?').run(now(), 'failed', discovered, imported, error instanceof WereadError ? error.message : '本次同步失败，请稍后重试。', runId);
+      throw error;
+    } finally { mpSyncInFlight.delete(userId); }
+  })();
+  mpSyncInFlight.set(userId, task); return task;
+}
+function mpWorkspace(userId, { articlePage = 1, articlePageSize = 20 } = {}) {
+  const settings = mpSettings(userId);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 864e5).toISOString();
+  const pageSize = mpArticlePageSizeOptions.has(Number(articlePageSize)) ? Number(articlePageSize) : 20;
+  const total = db.prepare(`SELECT count(*) AS total FROM items WHERE user_id=? AND source_type='mp' AND created_at>=?`).get(userId, sevenDaysAgo).total;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(totalPages, Math.max(1, Number.parseInt(articlePage, 10) || 1));
+  const articles = db.prepare(`SELECT i.*,COALESCE(NULLIF(i.source_label,''),s.name,'微信公众号') AS mp_name,COALESCE(s.cover_url,'') AS mp_cover_url,COALESCE(NULLIF(i.mp_image_url,''),s.cover_url,'') AS mp_article_image_url,r.content_status
+    FROM items i LEFT JOIN mp_review_records r ON r.item_id=i.id AND r.user_id=i.user_id LEFT JOIN mp_subscriptions s ON s.id=r.subscription_id
+    WHERE i.user_id=? AND i.source_type='mp' AND i.created_at>=? ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?`).all(userId, sevenDaysAgo, pageSize, (page - 1) * pageSize)
+    .map((row) => ({ ...row, is_read: Boolean(row.is_read), is_archived: Boolean(row.is_archived), is_favorite: Boolean(row.is_favorite) }));
+  return { auth: publicWereadAuth(userId), settings, subscriptions: db.prepare('SELECT * FROM mp_subscriptions WHERE user_id=? ORDER BY created_at DESC').all(userId).map((row) => { const { rss_token: rssToken, ...subscription } = row; return { ...subscription, enabled: Boolean(subscription.enabled), rssPath: `/feed/${encodeURIComponent(subscription.book_id)}.rss` }; }), articles, articlePagination: { page, pageSize, total, totalPages }, runs: db.prepare('SELECT * FROM mp_sync_runs WHERE user_id=? ORDER BY started_at DESC LIMIT 3').all(userId), syncing: mpSyncInFlight.has(userId) };
+}
+function startMpSubscriptionScheduler() {
+  const tick = async () => {
+    const rows = db.prepare(`SELECT s.user_id,s.refresh_minutes,s.last_run_at FROM mp_sync_settings s WHERE EXISTS (SELECT 1 FROM mp_subscriptions p WHERE p.user_id=s.user_id AND p.enabled=1)`).all();
+    for (const row of rows) if (!mpSyncInFlight.has(row.user_id) && (!row.last_run_at || Date.now() - Date.parse(row.last_run_at) >= Number(row.refresh_minutes) * 60_000)) runMpSync(row.user_id).catch(() => undefined);
+  };
+  const timer = setInterval(() => { void tick(); }, 60_000); timer.unref?.(); void tick();
+}
 function currentUser(req) {
   const session = cookies(req).pl_session;
   if (!session) return null;
@@ -575,7 +1060,7 @@ function itemData(item) {
   return { ...item, archive_path: existsSync(archivePath) ? archivePath : null, pdf_path: existsSync(pdfPath) ? pdfPath : null, is_read: Boolean(item.is_read), is_archived: Boolean(item.is_archived), is_favorite: Boolean(item.is_favorite), tags, folders, highlights };
 }
 function listItems(userId, params) {
-  const clauses = ['i.user_id=?']; const values = [userId];
+  const clauses = ["i.user_id=?", "i.source_type <> 'mp'"]; const values = [userId];
   if (params.get('status') === 'unread') clauses.push('i.is_read=0');
   if (params.get('status') === 'archived') clauses.push('i.is_archived=1');
   if (params.get('status') === 'favorite') clauses.push('i.is_favorite=1');
@@ -615,7 +1100,7 @@ function noteForUser(userId, noteId) {
     FROM highlights h JOIN items i ON i.id=h.item_id WHERE h.id=? AND i.user_id=?`).get(noteId, userId);
 }
 function listNotes(userId, params) {
-  const clauses = ["i.user_id=?", "trim(h.note_title) <> ''", "trim(h.note) <> ''"];
+  const clauses = ["i.user_id=?", "i.source_type <> 'mp'", "trim(h.note_title) <> ''", "trim(h.note) <> ''"];
   const values = [userId];
   const articleStatus = params.get('articleStatus') || 'all';
   if (articleStatus === 'active') clauses.push('i.is_archived=0');
@@ -635,41 +1120,41 @@ function listNotes(userId, params) {
 }
 function folderSummary(userId, params) {
   const query = String(params.get('q') || '').trim(); const values = [userId]; let where = 'f.user_id=?';
-  if (query) { where += " AND (f.name LIKE ? OR EXISTS (SELECT 1 FROM item_folders sf JOIN items si ON si.id=sf.item_id WHERE sf.folder_id=f.id AND si.title LIKE ?))"; values.push(`%${query}%`, `%${query}%`); }
+  if (query) { where += " AND (f.name LIKE ? OR EXISTS (SELECT 1 FROM item_folders sf JOIN items si ON si.id=sf.item_id WHERE sf.folder_id=f.id AND si.source_type <> 'mp' AND si.title LIKE ?))"; values.push(`%${query}%`, `%${query}%`); }
   const page = Math.max(Number(params.get('page') || 1), 1); const pageSize = Math.min(Math.max(Number(params.get('pageSize') || 100), 1), 100);
   const total = db.prepare(`SELECT count(*) AS total FROM folders f WHERE ${where}`).get(...values).total;
-  const folders = db.prepare(`SELECT f.id,f.name,f.sort_order,f.created_at,count(ifo.item_id) AS count,max(i.created_at) AS latest_item_at
+  const folders = db.prepare(`SELECT f.id,f.name,f.sort_order,f.created_at,count(CASE WHEN i.source_type <> 'mp' THEN ifo.item_id END) AS count,max(CASE WHEN i.source_type <> 'mp' THEN i.created_at END) AS latest_item_at
     FROM folders f LEFT JOIN item_folders ifo ON ifo.folder_id=f.id LEFT JOIN items i ON i.id=ifo.item_id
     WHERE ${where} GROUP BY f.id ORDER BY f.sort_order ASC,f.name ASC LIMIT ? OFFSET ?`).all(...values, pageSize, (page - 1) * pageSize);
   return { folders, total, page, pageSize };
 }
 function tagSummary(userId, params) {
   const query = String(params.get('q') || '').trim(); const values = [userId]; let where = 't.user_id=?';
-  if (query) { where += " AND (t.name LIKE ? OR EXISTS (SELECT 1 FROM item_tags st JOIN items si ON si.id=st.item_id WHERE st.tag_id=t.id AND si.title LIKE ?))"; values.push(`%${query}%`, `%${query}%`); }
+  if (query) { where += " AND (t.name LIKE ? OR EXISTS (SELECT 1 FROM item_tags st JOIN items si ON si.id=st.item_id WHERE st.tag_id=t.id AND si.source_type <> 'mp' AND si.title LIKE ?))"; values.push(`%${query}%`, `%${query}%`); }
   const page = Math.max(Number(params.get('page') || 1), 1); const pageSize = Math.min(Math.max(Number(params.get('pageSize') || 100), 1), 100);
   const total = db.prepare(`SELECT count(*) AS total FROM tags t WHERE ${where}`).get(...values).total;
-  const tags = db.prepare(`SELECT t.id,t.name,t.created_at,count(it.item_id) AS count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id WHERE ${where} GROUP BY t.id ORDER BY t.name ASC LIMIT ? OFFSET ?`).all(...values, pageSize, (page - 1) * pageSize);
+  const tags = db.prepare(`SELECT t.id,t.name,t.created_at,count(CASE WHEN i.source_type <> 'mp' THEN it.item_id END) AS count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id LEFT JOIN items i ON i.id=it.item_id WHERE ${where} GROUP BY t.id ORDER BY t.name ASC LIMIT ? OFFSET ?`).all(...values, pageSize, (page - 1) * pageSize);
   return { tags, total, page, pageSize };
 }
 function folderDetail(userId, folderId, params) {
   const folder = db.prepare('SELECT id,name,sort_order,created_at FROM folders WHERE id=? AND user_id=?').get(folderId, userId); if (!folder) return null;
   const page = Math.max(Number(params.get('page') || 1), 1); const pageSize = Math.min(Math.max(Number(params.get('pageSize') || 100), 1), 100);
-  const total = db.prepare('SELECT count(*) AS total FROM item_folders WHERE folder_id=?').get(folder.id).total;
-  const rows = db.prepare('SELECT i.* FROM items i JOIN item_folders ifo ON ifo.item_id=i.id WHERE ifo.folder_id=? AND i.user_id=? ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?').all(folder.id, userId, pageSize, (page - 1) * pageSize).map(itemData);
+  const total = db.prepare("SELECT count(*) AS total FROM item_folders ifo JOIN items i ON i.id=ifo.item_id WHERE ifo.folder_id=? AND i.source_type <> 'mp'").get(folder.id).total;
+  const rows = db.prepare("SELECT i.* FROM items i JOIN item_folders ifo ON ifo.item_id=i.id WHERE ifo.folder_id=? AND i.user_id=? AND i.source_type <> 'mp' ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?").all(folder.id, userId, pageSize, (page - 1) * pageSize).map(itemData);
   return { ...folder, items: rows, total, page, pageSize };
 }
 function tagDetail(userId, tagId, params) {
   const tag = db.prepare('SELECT id,name,created_at FROM tags WHERE id=? AND user_id=?').get(tagId, userId); if (!tag) return null;
   const page = Math.max(Number(params.get('page') || 1), 1); const pageSize = Math.min(Math.max(Number(params.get('pageSize') || 100), 1), 100);
-  const total = db.prepare('SELECT count(*) AS total FROM item_tags WHERE tag_id=?').get(tag.id).total;
-  const rows = db.prepare('SELECT i.* FROM items i JOIN item_tags it ON it.item_id=i.id WHERE it.tag_id=? AND i.user_id=? ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?').all(tag.id, userId, pageSize, (page - 1) * pageSize).map(itemData);
+  const total = db.prepare("SELECT count(*) AS total FROM item_tags it JOIN items i ON i.id=it.item_id WHERE it.tag_id=? AND i.source_type <> 'mp'").get(tag.id).total;
+  const rows = db.prepare("SELECT i.* FROM items i JOIN item_tags it ON it.item_id=i.id WHERE it.tag_id=? AND i.user_id=? AND i.source_type <> 'mp' ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?").all(tag.id, userId, pageSize, (page - 1) * pageSize).map(itemData);
   return { ...tag, items: rows, total, page, pageSize };
 }
 function listTimeline(userId, params) {
   const categories = String(params.get('types') || '').split(',').filter(Boolean);
   const categoryTypes = { article: ['item_created', 'item_archived', 'item_unarchived', 'item_favorited', 'item_unfavorited'], note: ['highlight_created', 'note_updated'], created: ['item_created'], favorite: ['item_favorited', 'item_unfavorited'], archive: ['item_archived', 'item_unarchived'], highlight: ['highlight_created'], noteUpdated: ['note_updated'], archived: ['item_archived', 'item_unarchived'] };
   const allowedTypes = [...new Set(Object.values(categoryTypes).flat())]; const allowed = new Set(allowedTypes); const types = [...new Set(categories.flatMap((entry) => categoryTypes[entry] || [entry]).filter((entry) => allowed.has(entry)))];
-  const clauses = ['e.user_id=?', `e.event_type IN (${allowedTypes.map(() => '?').join(',')})`]; const values = [userId, ...allowedTypes];
+  const clauses = ['e.user_id=?', "(i.source_type IS NULL OR i.source_type <> 'mp')", `e.event_type IN (${allowedTypes.map(() => '?').join(',')})`]; const values = [userId, ...allowedTypes];
   if (types.length) { clauses.push(`e.event_type IN (${types.map(() => '?').join(',')})`); values.push(...types); }
   const articleStatus = params.get('articleStatus') || 'all'; if (articleStatus === 'active') clauses.push('i.is_archived=0'); if (articleStatus === 'archived') clauses.push('i.is_archived=1');
   const query = String(params.get('q') || '').trim(); if (query) { const keyword = `%${query}%`; clauses.push('(i.title LIKE ? OR i.url LIKE ? OR h.note_title LIKE ? OR h.note LIKE ? OR h.text LIKE ? OR e.event_type LIKE ?)'); values.push(keyword, keyword, keyword, keyword, keyword, keyword); }
@@ -703,7 +1188,12 @@ async function createItem(userId, payload) {
   const normalized = normalizedUrl(payload.url);
   const itemId = id('itm'); const time = now(); let page;
   try { page = await fetchPage(normalized); }
-  catch (error) { page = clientSnapshotPage(payload, normalized) || { url: normalized, title: payload.title || new URL(normalized).hostname, summary: '', snapshot: '', error: error.message }; }
+  catch (error) {
+    const browserSnapshot = clientSnapshotPage(payload, normalized);
+    page = browserSnapshot
+      ? { ...browserSnapshot, fetch_warning: `原网站未能由服务器抓取（${error.message}）。已保存当前浏览器提交的文章正文。` }
+      : { url: normalized, title: payload.title || new URL(normalized).hostname, summary: '', snapshot: '', error: error.message };
+  }
   const customTitle = String(payload.title || '').trim().slice(0, 300); if (customTitle) page.title = customTitle;
   const draft = { id: itemId, user_id: userId, title: page.title, archive_folder: '' };
   const archiveFolder = archiveFolderFor(draft);
@@ -712,8 +1202,8 @@ async function createItem(userId, payload) {
   if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(userId, itemId, page.snapshot, archive);
   db.exec('BEGIN');
   try {
-    db.prepare('INSERT INTO items (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,archive_folder,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(itemId, userId, page.url, normalized, page.title, page.summary, page.snapshot, page.error ? 'failed' : 'ready', page.error || null, archiveFolder, time, time);
+    db.prepare('INSERT INTO items (id,user_id,url,normalized_url,title,summary,html_snapshot,fetch_status,fetch_error,fetch_warning,archive_folder,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(itemId, userId, page.url, normalized, page.title, page.summary, page.snapshot, page.error ? 'failed' : 'ready', page.error || null, page.fetch_warning || null, archiveFolder, time, time);
     addTags(userId, itemId, payload.tags); addFolders(userId, itemId, payload.folderId ? [payload.folderId] : payload.folderIds);
     timelineEvent(userId, itemId, 'item_created', null, time);
     db.exec('COMMIT');
@@ -721,16 +1211,24 @@ async function createItem(userId, payload) {
   audit(userId, 'item.create', itemId);
   return { duplicate: false, item: itemData(db.prepare('SELECT * FROM items WHERE id=?').get(itemId)) };
 }
-async function refetchItem(item) {
+async function refetchItem(item, payload = {}) {
   const time = now(); let page;
   try { page = await fetchPage(item.normalized_url); }
-  catch (error) { page = { url: item.url, title: item.title, summary: item.summary, snapshot: item.html_snapshot, error: error.message }; }
+  catch (error) {
+    const browserSnapshot = clientSnapshotPage(payload, item.normalized_url);
+    const retainedSnapshot = clientSnapshotPage({ htmlSnapshot: item.html_snapshot }, item.normalized_url);
+    page = browserSnapshot
+      ? { ...browserSnapshot, title: String(payload.title || item.title).trim() || item.title, fetch_warning: `原网站未能由服务器抓取（${error.message}）。已使用当前浏览器提交的文章正文更新快照。` }
+      : retainedSnapshot
+        ? { url: item.url, title: item.title, summary: item.summary, snapshot: item.html_snapshot, retained: true, fetch_warning: `原网站未能更新（${error.message}）。已保留此前保存的本地文章快照。` }
+        : { url: item.url, title: item.title, summary: item.summary, snapshot: '', error: error.message };
+  }
   const user = archiveUser(item.user_id);
-  const archiveFolder = !page.error ? archiveFolderFor({ ...item, archive_folder: '', title: page.title }, page.title) : item.archive_folder;
-  const archive = !page.error ? moveArchiveDirectory(item, user, archiveFolder) : archiveInfo(item, user);
-  if (!page.error && page.snapshot) page.snapshot = await archiveSnapshot(item.user_id, item.id, page.snapshot, archive);
-  db.prepare('UPDATE items SET url=?,title=?,summary=?,html_snapshot=?,fetch_status=?,fetch_error=?,archive_folder=?,updated_at=? WHERE id=?')
-    .run(page.url, page.title, page.summary, page.snapshot, page.error ? 'failed' : 'ready', page.error || null, archive.folder, time, item.id);
+  const archiveFolder = page.retained || page.error ? item.archive_folder : archiveFolderFor({ ...item, archive_folder: '', title: page.title }, page.title);
+  const archive = page.retained || page.error ? archiveInfo(item, user) : moveArchiveDirectory(item, user, archiveFolder);
+  if (!page.error && !page.retained && page.snapshot) page.snapshot = await archiveSnapshot(item.user_id, item.id, page.snapshot, archive);
+  db.prepare('UPDATE items SET url=?,title=?,summary=?,html_snapshot=?,fetch_status=?,fetch_error=?,fetch_warning=?,archive_folder=?,updated_at=? WHERE id=?')
+    .run(page.url, page.title, page.summary, page.snapshot, page.error ? 'failed' : 'ready', page.error || null, page.fetch_warning || null, archive.folder, time, item.id);
   return itemData(itemForUser(item.user_id, item.id));
 }
 function itemForUser(userId, itemId) { return db.prepare('SELECT * FROM items WHERE id=? AND user_id=?').get(itemId, userId); }
@@ -740,13 +1238,88 @@ function cors(req, res) { if (req.headers.origin?.startsWith('chrome-extension:/
 async function api(req, res, url) {
   cors(req, res); if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
   const path = url.pathname;
-  if (path === '/api/health') return ok(res, { status: 'ok', version: '0.0.3' });
+  if (path === '/api/health') return ok(res, { status: 'ok', version: '1.0.0' });
   if (path === '/api/auth/login' && req.method === 'POST') { const body = await readBody(req); const user = db.prepare('SELECT * FROM users WHERE username=?').get(String(body.username || '').trim()); if (!user || user.disabled || !(await passwordMatches(String(body.password || ''), user.password_hash))) return fail(res, 401, 'INVALID_CREDENTIALS', '用户名或密码错误。'); const sessionId = id('ses'); db.prepare('INSERT INTO sessions (id,user_id,expires_at,created_at) VALUES (?,?,?,?)').run(sessionId, user.id, new Date(Date.now() + 7 * 864e5).toISOString(), now()); setCookie(res, sessionId); audit(user.id, 'auth.login'); return ok(res, { id: user.id, username: user.username, role: user.role }); }
   if (path === '/api/auth/logout' && req.method === 'POST') { const session = cookies(req).pl_session; if (session) db.prepare('DELETE FROM sessions WHERE id=?').run(session); clearCookie(res); return ok(res, { loggedOut: true }); }
   if (path === '/api/auth/me' && req.method === 'GET') { const user = requireUser(req, res); if (user) ok(res, user); return; }
+  if (path === '/api/mp/media' && req.method === 'GET') {
+    const user = requireUser(req, res); if (!user) return;
+    let mediaUrl;
+    try { mediaUrl = publicUrl(url.searchParams.get('url') || ''); }
+    catch { return fail(res, 400, 'INVALID_MP_MEDIA', '无效的公众号图片地址。'); }
+    const allowedHosts = new Set(['mmbiz.qpic.cn', 'wx.qlogo.cn', 'mmbiz.qlogo.cn', 'mmecoa.qpic.cn']);
+    if (!allowedHosts.has(mediaUrl.hostname.toLowerCase())) return fail(res, 400, 'INVALID_MP_MEDIA', '仅支持微信公众平台图片。');
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const response = await fetch(mediaUrl, { redirect: 'manual', signal: controller.signal, headers: { 'User-Agent': pageHeaders['User-Agent'], Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8', Referer: 'https://mp.weixin.qq.com/' } });
+      const contentType = response.headers.get('content-type') || '';
+      const contentLength = Number(response.headers.get('content-length') || 0);
+      if (!response.ok || !contentType.toLowerCase().startsWith('image/') || contentLength > 8 * 1024 * 1024) return fail(res, 502, 'MP_MEDIA_UNAVAILABLE', '公众号图片暂时无法加载。');
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > 8 * 1024 * 1024) return fail(res, 502, 'MP_MEDIA_UNAVAILABLE', '公众号图片文件过大。');
+      res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': buffer.length, 'Cache-Control': 'private, max-age=86400' });
+      return res.end(buffer);
+    } catch { return fail(res, 502, 'MP_MEDIA_UNAVAILABLE', '公众号图片暂时无法加载。'); }
+    finally { clearTimeout(timeout); }
+  }
+  if (path === '/api/mp/subscriptions' && req.method === 'GET') { const user = requireUser(req, res); if (user) ok(res, mpWorkspace(user.id, { articlePage: url.searchParams.get('articlePage'), articlePageSize: url.searchParams.get('articlePageSize') })); return; }
+  if (path === '/api/mp/auth/qr' && req.method === 'POST') {
+    const user = requireUser(req, res); if (!user) return;
+    try { return ok(res, await createWereadQr(user.id)); } catch (error) { return fail(res, 502, error.code || 'WEREAD_QR_FAILED', error.message || '无法获取微信读书二维码。'); }
+  }
+  if (path === '/api/mp/auth/qr/status' && req.method === 'GET') {
+    const user = requireUser(req, res); if (!user) return;
+    try { return ok(res, await pollWereadQr(user.id)); } catch (error) { return fail(res, 400, error.code || 'WEREAD_QR_STATUS', error.message || '无法获取授权状态。'); }
+  }
+  if (path === '/api/mp/auth' && req.method === 'DELETE') {
+    const user = requireUser(req, res); if (!user) return;
+    db.prepare('DELETE FROM weread_auth WHERE user_id=?').run(user.id); wereadQrSessions.delete(user.id); removeWereadBrowserProfile(user.id); audit(user.id, 'mp.weread.revoke'); return ok(res, { removed: true });
+  }
+  if (path === '/api/mp/bookshelf' && req.method === 'GET') {
+    const user = requireUser(req, res); if (!user) return;
+    try { return ok(res, { books: await wereadShelfForUser(user.id) }); } catch (error) { return fail(res, 400, error.code || 'WEREAD_SHELF_FAILED', error.message || '无法读取微信读书书架。'); }
+  }
+  if (path === '/api/mp/settings' && req.method === 'PATCH') {
+    const user = requireUser(req, res); if (!user) return; const body = await readBody(req); const syncMinutes = Number(body.syncMinutes);
+    if (!mpSyncMinuteOptions.has(syncMinutes)) return fail(res, 400, 'INVALID_MP_SYNC_FREQUENCY', '同步频率仅支持每 1、4、6、8、12 或 24 小时。');
+    db.prepare(`INSERT INTO mp_sync_settings (user_id,refresh_minutes,updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET refresh_minutes=excluded.refresh_minutes,updated_at=excluded.updated_at`).run(user.id, syncMinutes, now()); audit(user.id, 'mp.settings.update'); return ok(res, mpSettings(user.id));
+  }
+  if (path === '/api/mp/subscriptions' && req.method === 'POST') {
+    const user = requireUser(req, res); if (!user) return; const body = await readBody(req);
+    const requested = Array.isArray(body.bookIds) ? body.bookIds : [body.bookId || body.readerUrl];
+    let bookIds = [];
+    try { bookIds = [...new Set(requested.map(normalizeMpBookId).filter(Boolean))]; }
+    catch { return fail(res, 400, 'INVALID_MP_SUBSCRIPTION', '请选择有效的微信读书公众号。'); }
+    if (!bookIds.length) return fail(res, 400, 'INVALID_MP_SUBSCRIPTION', '请至少选择一个微信读书中的公众号。');
+    const subscriptions = []; const failed = [];
+    for (const bookId of bookIds) {
+      try { subscriptions.push(await addWereadMpSubscription(user.id, bookId)); }
+      catch (error) { failed.push({ bookId, message: error instanceof WereadError ? error.message : '添加失败，请稍后重试。' }); }
+    }
+    if (!subscriptions.length) return fail(res, 400, 'MP_SUBSCRIPTION_FAILED', failed[0]?.message || '无法添加公众号订阅。');
+    return ok(res, { subscriptions, failed }, 201);
+  }
+  if (path === '/api/mp/sync' && req.method === 'POST') {
+    const user = requireUser(req, res); if (!user) return;
+    try { return ok(res, await runMpSync(user.id)); } catch (error) { return fail(res, 400, error.code || 'MP_SYNC_FAILED', error.message || '本次同步失败。'); }
+  }
+  const mpSubscriptionMatch = path.match(/^\/api\/mp\/subscriptions\/([^/]+)$/);
+  const mpSubscriptionSyncMatch = path.match(/^\/api\/mp\/subscriptions\/([^/]+)\/sync$/);
+  if (mpSubscriptionSyncMatch && req.method === 'POST') {
+    const user = requireUser(req, res); if (!user) return; const subscription = db.prepare('SELECT id FROM mp_subscriptions WHERE id=? AND user_id=?').get(mpSubscriptionSyncMatch[1], user.id);
+    if (!subscription) return fail(res, 404, 'MP_SUBSCRIPTION_NOT_FOUND', '未找到该公众号订阅。');
+    try { return ok(res, await runMpSync(user.id, subscription.id)); } catch (error) { return fail(res, 400, error.code || 'MP_SYNC_FAILED', error.message || '本次同步失败。'); }
+  }
+  if (mpSubscriptionMatch) {
+    const user = requireUser(req, res); if (!user) return; const subscription = db.prepare('SELECT * FROM mp_subscriptions WHERE id=? AND user_id=?').get(mpSubscriptionMatch[1], user.id);
+    if (!subscription) return fail(res, 404, 'MP_SUBSCRIPTION_NOT_FOUND', '未找到该公众号订阅。');
+    if (req.method === 'PATCH') { const body = await readBody(req); if (typeof body.enabled !== 'boolean') return fail(res, 400, 'INVALID_MP_SUBSCRIPTION', '请提供有效的启用状态。'); db.prepare('UPDATE mp_subscriptions SET enabled=?,updated_at=? WHERE id=?').run(Number(body.enabled), now(), subscription.id); audit(user.id, body.enabled ? 'mp.subscription.enable' : 'mp.subscription.pause', subscription.id); return ok(res, { ...db.prepare('SELECT * FROM mp_subscriptions WHERE id=?').get(subscription.id), enabled: body.enabled }); }
+    if (req.method === 'DELETE') { db.prepare('DELETE FROM mp_subscriptions WHERE id=?').run(subscription.id); audit(user.id, 'mp.subscription.delete', subscription.id); return ok(res, { deleted: true }); }
+    return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的公众号订阅操作。');
+  }
   if (path === '/api/preferences') { const user = requireUser(req, res); if (!user) return; if (req.method === 'GET') return ok(res, preferencesForUser(user.id)); if (req.method === 'PATCH') { const body = await readBody(req); const current = preferencesForUser(user.id); const homepageView = body.homepageView === 'cards' || body.homepageView === 'list' ? body.homepageView : current.homepageView; const readerDisplay = body.readerDisplay && typeof body.readerDisplay === 'object' && !Array.isArray(body.readerDisplay) ? body.readerDisplay : current.readerDisplay; db.prepare('INSERT INTO user_preferences (user_id,homepage_view,reader_display,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET homepage_view=excluded.homepage_view,reader_display=excluded.reader_display,updated_at=excluded.updated_at').run(user.id, homepageView, json(readerDisplay), now()); audit(user.id, 'preferences.update'); return ok(res, { homepageView, readerDisplay }); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的偏好设置操作。'); }
   if (path === '/api/auth/password' && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const body = await readBody(req); const newPassword = String(body.newPassword || ''); const stored = db.prepare('SELECT password_hash FROM users WHERE id=?').get(user.id); if (!(await passwordMatches(String(body.currentPassword || ''), stored.password_hash))) return fail(res, 400, 'INVALID_PASSWORD', '当前密码不正确。'); if (!newPassword) return fail(res, 400, 'INVALID_PASSWORD', '新密码不能为空。'); db.prepare('UPDATE users SET password_hash=?,updated_at=? WHERE id=?').run(await passwordHash(newPassword), now(), user.id); audit(user.id, 'auth.password.change'); return ok(res, { changed: true }); }
-  if (path === '/api/dashboard' && req.method === 'GET') { const user = requireUser(req, res); if (!user) return; const tags = db.prepare('SELECT t.id,t.name,count(it.item_id) AS count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id WHERE t.user_id=? GROUP BY t.id ORDER BY count DESC,t.name LIMIT 12').all(user.id); const folders = db.prepare('SELECT f.id,f.name,f.sort_order,f.created_at,count(ifo.item_id) AS count FROM folders f LEFT JOIN item_folders ifo ON ifo.folder_id=f.id WHERE f.user_id=? GROUP BY f.id ORDER BY f.sort_order,f.name').all(user.id); const highlights = db.prepare('SELECT h.*,i.title FROM highlights h JOIN items i ON i.id=h.item_id WHERE i.user_id=? ORDER BY h.created_at DESC LIMIT 3').all(user.id); const recentItem = db.prepare('SELECT * FROM items WHERE user_id=? AND last_opened_at IS NOT NULL ORDER BY last_opened_at DESC LIMIT 1').get(user.id); return ok(res, { tags, folders, highlights, recentItem: recentItem ? itemData(recentItem) : null, counts: { all: db.prepare('SELECT count(*) AS n FROM items WHERE user_id=?').get(user.id).n, unread: db.prepare('SELECT count(*) AS n FROM items WHERE user_id=? AND is_read=0').get(user.id).n, archived: db.prepare('SELECT count(*) AS n FROM items WHERE user_id=? AND is_archived=1').get(user.id).n, favorite: db.prepare('SELECT count(*) AS n FROM items WHERE user_id=? AND is_favorite=1').get(user.id).n } }); }
+  if (path === '/api/dashboard' && req.method === 'GET') { const user = requireUser(req, res); if (!user) return; const ordinary = "i.source_type <> 'mp'"; const tags = db.prepare(`SELECT t.id,t.name,count(it.item_id) AS count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id LEFT JOIN items i ON i.id=it.item_id WHERE t.user_id=? GROUP BY t.id HAVING count(CASE WHEN ${ordinary} THEN 1 END) > 0 ORDER BY count(CASE WHEN ${ordinary} THEN 1 END) DESC,t.name LIMIT 12`).all(user.id); const folders = db.prepare(`SELECT f.id,f.name,f.sort_order,f.created_at,count(CASE WHEN ${ordinary} THEN ifo.item_id END) AS count FROM folders f LEFT JOIN item_folders ifo ON ifo.folder_id=f.id LEFT JOIN items i ON i.id=ifo.item_id WHERE f.user_id=? GROUP BY f.id ORDER BY f.sort_order,f.name`).all(user.id); const highlights = db.prepare(`SELECT h.*,i.title FROM highlights h JOIN items i ON i.id=h.item_id WHERE i.user_id=? AND ${ordinary} ORDER BY h.created_at DESC LIMIT 3`).all(user.id); const recentItem = db.prepare(`SELECT * FROM items i WHERE i.user_id=? AND ${ordinary} AND last_opened_at IS NOT NULL ORDER BY last_opened_at DESC LIMIT 1`).get(user.id); const mpAuth = publicWereadAuth(user.id); const mpSubscriptionCount = db.prepare('SELECT count(*) AS total FROM mp_subscriptions WHERE user_id=?').get(user.id).total; return ok(res, { tags, folders, highlights, recentItem: recentItem ? itemData(recentItem) : null, mpAuth, mpSubscriptionCount, counts: { all: db.prepare(`SELECT count(*) AS n FROM items i WHERE i.user_id=? AND ${ordinary}`).get(user.id).n, unread: db.prepare(`SELECT count(*) AS n FROM items i WHERE i.user_id=? AND ${ordinary} AND is_read=0`).get(user.id).n, archived: db.prepare(`SELECT count(*) AS n FROM items i WHERE i.user_id=? AND ${ordinary} AND is_archived=1`).get(user.id).n, favorite: db.prepare(`SELECT count(*) AS n FROM items i WHERE i.user_id=? AND ${ordinary} AND is_favorite=1`).get(user.id).n } }); }
   if (path === '/api/notes' && req.method === 'GET') { const user = requireUser(req, res); if (user) ok(res, listNotes(user.id, url.searchParams)); return; }
   const noteMatch = path.match(/^\/api\/notes\/([^/]+)$/);
   if (noteMatch) {
@@ -782,7 +1355,7 @@ async function api(req, res, url) {
   const itemMatch = path.match(/^\/api\/items\/([^/]+)$/);
   const refetchMatch = path.match(/^\/api\/items\/([^/]+)\/refetch$/);
   const pdfMatch = path.match(/^\/api\/items\/([^/]+)\/pdf$/);
-  if (refetchMatch && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const item = itemForUser(user.id, refetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); return ok(res, await refetchItem(item)); }
+  if (refetchMatch && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const item = itemForUser(user.id, refetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); return ok(res, await refetchItem(item, await readBody(req))); }
   if (pdfMatch && req.method === 'POST') { const user = requireUser(req, res); if (!user) return; const item = itemForUser(user.id, pdfMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该条目。'); try { return ok(res, await createItemPdf(item)); } catch (error) { return fail(res, 409, 'PDF_UNAVAILABLE', error.message); } }
   if (itemMatch) {
     const user = requireUser(req, res); if (!user) return;
@@ -842,9 +1415,9 @@ async function api(req, res, url) {
   if (path === '/api/export' && req.method === 'GET') {
     const user = requireUser(req, res); if (!user) return;
     if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导出。');
-    const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events'];
+    const tableNames = serviceBackupTables;
     const tables = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
-    const payload = { format: 'paperleaf-service-backup', version: '0.0.3', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。' }, tables };
+    const payload = { format: 'paperleaf-service-backup', version: '1.0.0', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。微信公众号订阅源会导出，但微信读书 Cookie、同步记录和去重记录不会导出，恢复后需重新扫码授权。' }, tables };
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="paperleaf-service-backup-${new Date().toISOString().slice(0, 10)}.json"` });
     return res.end(JSON.stringify(payload, null, 2));
   }
@@ -852,7 +1425,7 @@ async function api(req, res, url) {
     const user = requireUser(req, res); if (!user) return;
     if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导入。');
     const body = await readBody(req);
-    const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events'];
+    const tableNames = serviceBackupTables;
     if (body?.format !== 'paperleaf-service-backup' || !body.tables || body.confirmReplace !== true || !tableNames.every((table) => Array.isArray(body.tables[table]))) return fail(res, 400, 'INVALID_BACKUP', '请选择有效的完整服务备份文件，并确认覆盖当前全部服务数据。');
     if (!body.tables.users.some((entry) => entry && entry.role === 'admin' && !entry.disabled)) return fail(res, 400, 'INVALID_BACKUP', '备份中至少需要保留一个启用的管理员账号。');
     const backupKey = String(body.system?.tokenEncryptionKey || '');
@@ -862,7 +1435,7 @@ async function api(req, res, url) {
     if (!tableNames.every((table) => body.tables[table].every((row) => row && typeof row === 'object' && columns[table].every((column) => Object.hasOwn(row, column))))) return fail(res, 400, 'INVALID_BACKUP', '备份数据结构与当前服务版本不兼容。');
     db.exec('BEGIN IMMEDIATE');
     try {
-      ['sessions', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`));
+      ['sessions', 'mp_review_records', 'mp_sync_runs', 'weread_auth', 'mp_subscriptions', 'mp_sync_settings', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`));
       tableNames.forEach((table) => {
         if (!body.tables[table].length) return;
         const names = columns[table]; const statement = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`);
@@ -883,7 +1456,7 @@ async function api(req, res, url) {
   const v1BookmarkStateMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)\/(favorite|archive)$/);
   if (v1BookmarkStateMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 执行文章状态操作。'); const item = itemForUser(user.id, v1BookmarkStateMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该文章。'); const action = v1BookmarkStateMatch[2]; const field = action === 'favorite' ? 'is_favorite' : 'is_archived'; const event = action === 'favorite' ? 'item_favorited' : 'item_archived'; db.exec('BEGIN'); try { db.prepare(`UPDATE items SET ${field}=1,updated_at=? WHERE id=?`).run(now(), item.id); if (!Boolean(item[field])) timelineEvent(user.id, item.id, event, null); db.exec('COMMIT'); } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } audit(user.id, `bookmark.${action}`, item.id); return ok(res, itemData(itemForUser(user.id, item.id))); }
   const v1BookmarkRefetchMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)\/refetch$/);
-  if (v1BookmarkRefetchMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkRefetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 重新抓取。'); return ok(res, await refetchItem(item)); }
+  if (v1BookmarkRefetchMatch) { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkRefetchMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。'); if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 POST 重新抓取。'); return ok(res, await refetchItem(item, await readBody(req))); }
   const v1BookmarkMatch = path.match(/^\/api\/v1\/bookmarks\/([^/]+)$/);
   if (v1BookmarkMatch) {
     const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const item = itemForUser(user.id, v1BookmarkMatch[1]); if (!item) return fail(res, 404, 'NOT_FOUND', '未找到该书签。');
@@ -906,8 +1479,8 @@ async function api(req, res, url) {
   const v1CollectionMatch = path.match(/^\/api\/v1\/collections\/([^/]+)$/);
   if (v1CollectionMatch) { const user = tokenUser(req, req.method === 'GET' ? ['items:read'] : ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); const collection = db.prepare('SELECT * FROM folders WHERE id=? AND user_id=?').get(v1CollectionMatch[1], user.id); if (!collection) return fail(res, 404, 'NOT_FOUND', '未找到收藏夹。'); if (req.method === 'GET') return ok(res, folderDetail(user.id, collection.id, url.searchParams)); if (req.method === 'PATCH') { const body = await readBody(req); const name = normalizedName(body.name, { maxLength: 9 }); if (!name) return fail(res, 400, 'INVALID_COLLECTION', '收藏夹名称为 1-9 个字符，且不能包含控制字符。'); try { db.prepare('UPDATE folders SET name=? WHERE id=?').run(name, collection.id); } catch { return fail(res, 409, 'DUPLICATE_COLLECTION', '已存在同名收藏夹。'); } audit(user.id, 'collection.rename', collection.id); return ok(res, db.prepare('SELECT * FROM folders WHERE id=?').get(collection.id)); } if (req.method === 'DELETE') { const removed = db.prepare('SELECT count(*) AS total FROM item_folders WHERE folder_id=?').get(collection.id).total; db.prepare('DELETE FROM folders WHERE id=?').run(collection.id); audit(user.id, 'collection.delete', collection.id); return ok(res, { deleted: true, removed }); } return fail(res, 405, 'METHOD_NOT_ALLOWED', '不支持的收藏夹操作。'); }
   if (path === '/api/v1/timeline') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', '仅支持 GET 读取时间轴。'); return ok(res, listTimeline(user.id, url.searchParams)); }
-  if (path === '/api/v1/data/export' && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导出。'); const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events']; const tables = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])); const payload = { format: 'paperleaf-service-backup', version: '0.0.3', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。' }, tables }; res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="paperleaf-service-backup-${new Date().toISOString().slice(0, 10)}.json"` }); return res.end(JSON.stringify(payload, null, 2)); }
-  if (path === '/api/v1/data/import' && req.method === 'POST') { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导入。'); const body = await readBody(req); const tableNames = ['users', 'items', 'tags', 'item_tags', 'folders', 'item_folders', 'highlights', 'api_tokens', 'audit_logs', 'user_preferences', 'timeline_events']; if (body?.format !== 'paperleaf-service-backup' || !body.tables || body.confirmReplace !== true || !tableNames.every((table) => Array.isArray(body.tables[table]))) return fail(res, 400, 'INVALID_BACKUP', '请选择有效的完整服务备份文件，并确认覆盖当前全部服务数据。'); if (!body.tables.users.some((entry) => entry && entry.role === 'admin' && !entry.disabled)) return fail(res, 400, 'INVALID_BACKUP', '备份中至少需要保留一个启用的管理员账号。'); const backupKey = String(body.system?.tokenEncryptionKey || ''); if (configuredTokenSecret && backupKey) return fail(res, 400, 'TOKEN_KEY_MANAGED', '当前服务使用环境变量管理 Token 加密密钥，不能导入含独立密钥的备份。'); if (!configuredTokenSecret && !backupKey && body.tables.api_tokens.length) return fail(res, 400, 'MISSING_TOKEN_KEY', '该备份缺少 Token 加密密钥，无法安全恢复 API Token。'); const columns = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)])); if (!tableNames.every((table) => body.tables[table].every((row) => row && typeof row === 'object' && columns[table].every((column) => Object.hasOwn(row, column))))) return fail(res, 400, 'INVALID_BACKUP', '备份数据结构与当前服务版本不兼容。'); db.exec('BEGIN IMMEDIATE'); try { ['sessions', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`)); tableNames.forEach((table) => { if (!body.tables[table].length) return; const names = columns[table]; const statement = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`); body.tables[table].forEach((row) => statement.run(...names.map((name) => row[name]))); }); if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('备份数据的关联关系校验失败。'); db.exec('COMMIT'); } catch (error) { try { db.exec('ROLLBACK'); } catch {} return fail(res, 400, 'IMPORT_FAILED', `导入失败：${error.message}`); } if (!configuredTokenSecret && backupKey) { writeFileSync(tokenKeyPath, backupKey, { mode: 0o600 }); tokenEncryptionSecret = backupKey; tokenEncryptionKey = createHash('sha256').update(backupKey).digest(); } clearCookie(res); return ok(res, { imported: true, counts: Object.fromEntries(tableNames.map((table) => [table, body.tables[table].length])), message: '完整服务数据已恢复。请使用备份中的账号重新登录。' }); }
+  if (path === '/api/v1/data/export' && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导出。'); const tableNames = serviceBackupTables; const tables = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])); const payload = { format: 'paperleaf-service-backup', version: '1.0.0', exportedAt: now(), system: { tokenEncryptionKey: configuredTokenSecret ? null : tokenEncryptionSecret, tokenKeyManagedByEnvironment: Boolean(configuredTokenSecret), archiveNotice: '文章本地归档文件不会随 JSON 导出或在导入时自动删除。微信公众号订阅源会导出，但微信读书 Cookie、同步记录和去重记录不会导出，恢复后需重新扫码授权。' }, tables }; res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="paperleaf-service-backup-${new Date().toISOString().slice(0, 10)}.json"` }); return res.end(JSON.stringify(payload, null, 2)); }
+  if (path === '/api/v1/data/import' && req.method === 'POST') { const user = tokenUser(req, ['items:write']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (user.role !== 'admin') return fail(res, 403, 'FORBIDDEN', '完整服务数据仅限管理员导入。'); const body = await readBody(req); const tableNames = serviceBackupTables; if (body?.format !== 'paperleaf-service-backup' || !body.tables || body.confirmReplace !== true || !tableNames.every((table) => Array.isArray(body.tables[table]))) return fail(res, 400, 'INVALID_BACKUP', '请选择有效的完整服务备份文件，并确认覆盖当前全部服务数据。'); if (!body.tables.users.some((entry) => entry && entry.role === 'admin' && !entry.disabled)) return fail(res, 400, 'INVALID_BACKUP', '备份中至少需要保留一个启用的管理员账号。'); const backupKey = String(body.system?.tokenEncryptionKey || ''); if (configuredTokenSecret && backupKey) return fail(res, 400, 'TOKEN_KEY_MANAGED', '当前服务使用环境变量管理 Token 加密密钥，不能导入含独立密钥的备份。'); if (!configuredTokenSecret && !backupKey && body.tables.api_tokens.length) return fail(res, 400, 'MISSING_TOKEN_KEY', '该备份缺少 Token 加密密钥，无法安全恢复 API Token。'); const columns = Object.fromEntries(tableNames.map((table) => [table, db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)])); if (!tableNames.every((table) => body.tables[table].every((row) => row && typeof row === 'object' && columns[table].every((column) => Object.hasOwn(row, column))))) return fail(res, 400, 'INVALID_BACKUP', '备份数据结构与当前服务版本不兼容。'); db.exec('BEGIN IMMEDIATE'); try { ['sessions', 'mp_review_records', 'mp_sync_runs', 'weread_auth', 'mp_subscriptions', 'mp_sync_settings', 'timeline_events', 'highlights', 'item_tags', 'item_folders', 'api_tokens', 'user_preferences', 'audit_logs', 'items', 'tags', 'folders', 'users'].forEach((table) => db.exec(`DELETE FROM ${table}`)); tableNames.forEach((table) => { if (!body.tables[table].length) return; const names = columns[table]; const statement = db.prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`); body.tables[table].forEach((row) => statement.run(...names.map((name) => row[name]))); }); if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('备份数据的关联关系校验失败。'); db.exec('COMMIT'); } catch (error) { try { db.exec('ROLLBACK'); } catch {} return fail(res, 400, 'IMPORT_FAILED', `导入失败：${error.message}`); } if (!configuredTokenSecret && backupKey) { writeFileSync(tokenKeyPath, backupKey, { mode: 0o600 }); tokenEncryptionSecret = backupKey; tokenEncryptionKey = createHash('sha256').update(backupKey).digest(); } clearCookie(res); return ok(res, { imported: true, counts: Object.fromEntries(tableNames.map((table) => [table, body.tables[table].length])), message: '完整服务数据已恢复。请使用备份中的账号重新登录。' }); }
   if (path === '/api/v1/items') { const user = tokenUser(req, req.method === 'POST' ? ['items:write'] : ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); if (req.method === 'GET') return ok(res, listItems(user.id, url.searchParams)); if (req.method === 'POST') { const result = await createItem(user.id, await readBody(req)); return ok(res, result, result.duplicate ? 200 : 201); } }
   if (path === '/api/v1/me' && req.method === 'GET') { const user = tokenUser(req, []); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效或已撤销。'); return ok(res, { username: user.username }); }
   if (path === '/api/v1/tags' && req.method === 'GET') { const user = tokenUser(req, ['items:read']); if (!user) return fail(res, 401, 'INVALID_TOKEN', 'Token 无效、已撤销或没有所需权限。'); return ok(res, { tags: db.prepare('SELECT id,name FROM tags WHERE user_id=? ORDER BY name COLLATE NOCASE ASC').all(user.id) }); }
@@ -941,6 +1514,46 @@ function serveArchive(req, res, url) {
   const cacheControl = extension === '.pdf' ? 'private, no-cache, max-age=0, must-revalidate' : 'private, max-age=31536000, immutable';
   res.writeHead(200, { 'Content-Type': types[extension] || 'application/octet-stream', 'Cache-Control': cacheControl }); createReadStream(file).pipe(res);
 }
+function serveMpRss(req, res, url) {
+  const feedMatch = url.pathname.match(/^\/feed\/([^/]+)\.rss$/);
+  const legacyMatch = url.pathname.match(/^\/rss\/mp\/([^/]+)\/([^/]+)\.xml$/);
+  if ((!feedMatch && !legacyMatch) || req.method !== 'GET') { res.writeHead(404); return res.end('Not found'); }
+  // The canonical public URL mirrors the WeRead public-account ID, e.g. /feed/MP_WXS_3097726746.rss.
+  const subscription = feedMatch
+    ? db.prepare('SELECT id,book_id,name,cover_url,rss_token,updated_at FROM mp_subscriptions WHERE book_id=? ORDER BY created_at ASC LIMIT 1').get(decodeURIComponent(feedMatch[1]))
+    : db.prepare('SELECT id,book_id,name,cover_url,rss_token,updated_at FROM mp_subscriptions WHERE id=? AND rss_token=?').get(decodeURIComponent(legacyMatch[1]), decodeURIComponent(legacyMatch[2]));
+  if (!subscription) { res.writeHead(404); return res.end('Not found'); }
+  const sevenDaysAgo = new Date(Date.now() - 7 * 864e5).toISOString();
+  const articles = db.prepare(`SELECT i.id,i.url,i.title,i.summary,i.created_at,COALESCE(NULLIF(i.mp_image_url,''),s.cover_url,'') AS image_url,r.review_id
+    FROM mp_review_records r JOIN items i ON i.id=r.item_id AND i.user_id=r.user_id JOIN mp_subscriptions s ON s.id=r.subscription_id
+    WHERE r.subscription_id=? AND i.source_type='mp' AND i.created_at>=?
+    ORDER BY i.created_at DESC,i.id DESC`).all(subscription.id, sevenDaysAgo);
+  const feedPath = `/feed/${encodeURIComponent(subscription.book_id)}.rss`;
+  const rssDate = (value) => {
+    const timestamp = new Date(value).getTime(); if (!Number.isFinite(timestamp)) return '';
+    const date = new Date(timestamp + 8 * 60 * 60 * 1000);
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']; const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const pad = (number) => String(number).padStart(2, '0');
+    return `${weekdays[date.getUTCDay()]}, ${pad(date.getUTCDate())} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0800`;
+  };
+  const rssImageType = (imageUrl) => {
+    try {
+      const parsed = new URL(imageUrl); const format = (parsed.searchParams.get('wx_fmt') || extname(parsed.pathname).slice(1)).toLowerCase();
+      return ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif' })[format] || 'image/jpeg';
+    } catch { return 'image/jpeg'; }
+  };
+  const entries = articles.map((article) => {
+    const title = String(article.title || '未命名文章'); const description = String(article.summary || title).replace(/\s+/g, ' ').trim();
+    const reviewId = String(article.review_id || article.id).replace(/^MP_WXS_/, ''); const identifier = `${subscription.book_id.replace(/^MP_WXS_/, '')}-${reviewId}`;
+    const enclosure = article.image_url ? `<enclosure url="${html(article.image_url)}" length="0" type="${rssImageType(article.image_url)}"></enclosure>` : '';
+    return ['    <item>', `      <id>${html(identifier)}</id>`, `      <title>${html(title)}</title>`, `      <description>${html(description)}</description>`, `      <guid>${html(article.url)}</guid>`, enclosure && `      ${enclosure}`, `      <link>${html(article.url)}</link>`, `      <pubDate>${rssDate(article.created_at)}</pubDate>`, '    </item>'].filter(Boolean).join('\n');
+  }).join('\n');
+  const channelImage = subscription.cover_url ? ['    <image>', `      <url>${html(subscription.cover_url)}</url>`, `      <title>${html(subscription.name)}</title>`, `      <link>${html(feedPath)}</link>`, '    </image>'].join('\n') : '';
+  const channel = ['  <channel>', `    <title>${html(subscription.name)}</title>`, `    <link>${html(feedPath)}</link>`, `    <description>${html(`${subscription.name} 的微信公众号订阅，由 PaperLeaf 通过微信读书同步，保留最近 7 天文章。`)}</description>`, '    <language>zh-CN</language>', '    <generator>PaperLeaf</generator>', `    <lastBuildDate>${rssDate(new Date())}</lastBuildDate>`, channelImage, entries, '  </channel>'].filter(Boolean).join('\n');
+  const xml = `<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0">\n${channel}\n</rss>\n`;
+  res.writeHead(200, { 'Content-Type': 'application/rss+xml; charset=utf-8', 'Cache-Control': 'private, max-age=300' });
+  res.end(xml);
+}
 function serveStatic(req, res, url) {
   if (url.pathname === '/print') return printable(req, res, url);
   if (url.pathname.startsWith('/archive/')) return serveArchive(req, res, url);
@@ -955,8 +1568,8 @@ function serveStatic(req, res, url) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  migrate(); await seed(); migrateArchivePaths(); if (process.env.PAPERLEAF_REBUILD_PDFS === '1') await createMissingArchivePdfs({ force: true }); startLibraryMonitor();
-  createServer(async (req, res) => { try { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (url.pathname.startsWith('/api/')) await api(req, res, url); else serveStatic(req, res, url); } catch (error) { console.error(error); fail(res, 500, 'INTERNAL_ERROR', '请求未完成，请稍后重试。'); } }).listen(port, host, () => console.log(`PaperLeaf listening on http://${host}:${port}`));
+  migrate(); await seed(); migrateArchivePaths(); if (process.env.PAPERLEAF_REBUILD_PDFS === '1') await createMissingArchivePdfs({ force: true }); startLibraryMonitor(); startMpSubscriptionScheduler();
+  createServer(async (req, res) => { try { const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`); if (url.pathname.startsWith('/api/')) await api(req, res, url); else if (url.pathname.startsWith('/feed/') || url.pathname.startsWith('/rss/')) serveMpRss(req, res, url); else serveStatic(req, res, url); } catch (error) { console.error(error); fail(res, 500, 'INTERNAL_ERROR', '请求未完成，请稍后重试。'); } }).listen(port, host, () => console.log(`PaperLeaf listening on http://${host}:${port}`));
 }
 
 export { archiveSegment, archiveSnapshot, clearItemArchive, clientSnapshotPage, createArchivePdf, fetchPage, itemData, sanitizeDocument };

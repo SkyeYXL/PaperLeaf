@@ -1,4 +1,4 @@
-# Docker only reads .dockerignore from the build-context root (v0.0.3/).
+# Docker only reads .dockerignore from the build-context root.
 # The active rules are maintained in ../.dockerignore; retain this file as a
 # human-readable mirror for Docker-related source inventory tools. In
 # particular, assets/screenshots/ is README-only material and is not required

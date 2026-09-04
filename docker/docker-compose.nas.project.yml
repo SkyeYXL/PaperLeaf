@@ -7,10 +7,12 @@ services:
       dockerfile: Dockerfile
     container_name: PaperLeaf
     labels:
-      com.paperleaf.version: "0.0.3"
+      com.paperleaf.version: "1.0.0"
       com.paperleaf.api-docs: "/api-docs.html"
       com.paperleaf.api-docs-navigation: "expandable"
     restart: unless-stopped
+    # 回收 Chromium 子进程，确保 PDF 与微信读书保活任务可持续运行。
+    init: true
     ports:
       - "47777:3080"
     environment:
@@ -19,10 +21,12 @@ services:
       PAPERLEAF_DATA_DIR: /app/data
       PAPERLEAF_ARCHIVE_DIR: /var/lib/paperleaf/library
       PAPERLEAF_PDF_BROWSER: /usr/bin/chromium
+      # 微信读书保活使用容器内 Chromium；其用户隔离 Profile 位于 ./PaperLeaf/data。
+      PAPERLEAF_WEREAD_BROWSER: /usr/bin/chromium
     volumes:
       - ./PaperLeaf/data:/app/data
-      # 默认使用项目内 Library；若 NAS 已将文章库迁移到其他持久化位置，
-      # 通过 PAPERLEAF_NAS_LIBRARY_DIR 覆盖，升级时必须保留既有值。
+      # 新部署默认使用项目内 Library。升级已有 NAS 时必须将该值替换为
+      # 既有文章库的绝对持久化路径，不能因模板默认值新建空文章库。
       - ${PAPERLEAF_NAS_LIBRARY_DIR:-./PaperLeaf/library}:/var/lib/paperleaf/library
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
